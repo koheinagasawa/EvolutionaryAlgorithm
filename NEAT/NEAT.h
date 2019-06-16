@@ -25,19 +25,23 @@ public:
     struct NodeGene;
     struct ConnectionGene;
     struct Genome;
+    struct Species;
 
     // Type shortcuts
     using GenerationId = uint32_t;
     using NodeGeneId = uint32_t;
     using InnovationId = uint32_t;
     using ActivationFuncId = uint16_t;
-    
+    using SpeciesId = uint16_t;
+
     using ActivationFunc = std::function<float(float)>;
     using FitnessFunc = std::function<float(const Genome&)>;
 
     using NodeGeneList = std::vector<NodeGene>;
     using ConnectionGeneList = std::vector<ConnectionGene>;
-    using NodeConnectionList = std::unordered_map<NodeGeneId, std::vector<InnovationId>>;
+    using GenomeList = std::vector<Genome>;
+    using SpeciesList = std::vector<Species>;
+    using NodeConnectionMap = std::unordered_map<NodeGeneId, std::vector<InnovationId>>;
 
     // Definitions of invalid id
     static const NodeGeneId invalidGeneId = (NodeGeneId)-1;
@@ -48,13 +52,15 @@ public:
     {
         Input,
         Output,
-        Hidden
+        Hidden,
+        Bias,
     };
 
     struct NodeGene
     {
         NodeGeneId id;
         NodeGeneType type;
+        ActivationFuncId activationFuncId;
     };
 
     struct ConnectionGene
@@ -62,7 +68,6 @@ public:
         InnovationId innovId;
         NodeGeneId inNode;
         NodeGeneId outNode;
-        ActivationFuncId activationFuncId;
         float weight;
         bool enabled;
     };
@@ -75,17 +80,26 @@ public:
         // List connection genes sorted by their innovation ids
         ConnectionGeneList connectionGenes;
 
-        NodeConnectionList incomingConnectionList;
-        NodeConnectionList outgoingConnectionList;
+        NodeConnectionMap incomingConnectionList;
+        NodeConnectionMap outgoingConnectionList;
+
+        SpeciesId species;
+    };
+
+    struct Species
+    {
+        SpeciesId id;
+        Genome representative;
     };
 
     struct Generation
     {
         GenerationId generationId = 0;
-        std::vector<Genome> genomes;
+        GenomeList genomes;
+        SpeciesList species;
     };
 
-    enum class DivercityProtectionMethod
+    enum class DiversityProtectionMethod
     {
         None,
         Speciation,
@@ -96,7 +110,7 @@ public:
     struct Configration
     {
         FitnessFunc fitnessFunction;
-        ActivationFunc defaultActivateFunction;
+        ActivationFuncId defaultActivateFunctionId = 0;
         std::vector<ActivationFunc> activateFunctions;
 
         uint32_t numOrganismsInGeneration = 100;
@@ -108,6 +122,9 @@ public:
         float interSpeciesMatingRate = .001f;
         float nodeAdditionRate = .03f;
         float connectionAdditionRate = .05f;
+        float speciationDistThreshold = 3.f;
+
+        bool enableCrossOver = true;
 
         bool useGlobalActivationFunc = true;
 
@@ -115,7 +132,9 @@ public:
         // If false, generated networks are guaranteed to be feed forward
         bool allowCyclicNetwork = true;
 
-        DivercityProtectionMethod divProtectMethod = DivercityProtectionMethod::Speciation;
+        DiversityProtectionMethod diversityProtection = DiversityProtectionMethod::Speciation;
+
+        bool enableSanityCheck = true;
     };
 
 public:
@@ -131,60 +150,102 @@ public:
     // After calling this function, Initialize has to be called in order to run NEAT again
     void Reset();
 
-    // Gain the new generation
-    auto GetNewGeneration() -> const Generation&;
+    // Generate a new generation and return it
+    auto GetNewGeneration() -> const Generation &;
+
+    // Return the current generation
+    auto GetCurrentGeneration() -> const Generation &;
+
+    // Print fitness of each genome in the current generation
+    void PrintFitness() const;
+
+private:
+
+    mutable InnovationId currentInnovationId = 0;
+    mutable NodeGeneId currentNodeGeneId = 0;
 
 protected:
 
     Generation generation;
-
-    InnovationId currentInnovationId = 0;
-    NodeGeneId currentNodeGeneId = 0;
 
     FitnessFunc fitnessFunc;
 
     ActivationFuncId defaultActivationFuncId = 0;
     std::vector<ActivationFunc> activationFuncs;
 
-    using GenomeNodePair = std::pair<Genome&, NodeGeneId>;
-    using GenomeConnectionPair = std::pair<Genome&, InnovationId>;
     using NodePair = std::pair<NodeGeneId, NodeGeneId>;
 
-    std::unordered_map<InnovationId, std::vector<GenomeNodePair>> newlyAddedNodes;
-    std::unordered_map<NodePair, std::vector<GenomeConnectionPair>, PairHash> newlyAddedConnections;
+    struct NewlyAddedNode
+    {
+        Genome& genome;
+        NodeGeneId node;
+        InnovationId innovId;
+    };
 
-    // Add a new node at a random connection
-    void AddNewNode(Genome& genome);
+    struct NewlyAddedConnection
+    {
+        Genome& genome;
+        InnovationId innovId;
+        NodePair nodes;
+    };
 
-    // Add a new connection between random two nodes
-    void AddNewConnection(Genome& genome);
+    using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NewlyAddedNode>>;
+    using NewlyAddedConnections = std::unordered_map<NodePair, std::vector<NewlyAddedConnection>, PairHash>;
 
-    // Add a new connection between random two nodes allowing cyclic network
-    void AddNewConnectionAllowingCyclic(Genome& genome);
+    bool isInitialized = false;
 
-    // Add a new connection between random two nodes without allowing cyclic network
-    // Direction of the new connection is guaranteed to be one direction (distance from in node to an input node is smaller than the one of out node)
-    void AddNewForwardConnection(Genome& genome);
+    inline auto GetCurrentNodeGeneId() const -> NodeGeneId { return currentNodeGeneId; }
 
-    // Get shortest distance from a node to an input node
-    // This function has to be called only when allowCyclicNetwork is false
-    int GetNodeDepth(Genome& genome, NodeGeneId id) const;
+    inline auto GetCurrentInnovationId() const -> InnovationId { return currentInnovationId; }
+
+    auto GetNewNodeGeneId() const -> NodeGeneId;
+
+    auto GetNewInnovationId() const -> InnovationId;
+
+    // Add a new node at a random connection in the genome
+    auto AddNewNode(Genome& genome) const ->NewlyAddedNode;
+
+    auto GenerateNewNode() const -> NodeGene;
+
+    auto Connect(NodeGeneId inNode, NodeGeneId outNode, float weight, Genome& genome) const -> InnovationId;
+
+    // Add a new connection between random two nodes in the genome
+    auto AddNewConnection(Genome& genome) const -> NewlyAddedConnection;
+
+    // Add a new connection between random two nodes in the genome allowing cyclic network
+    auto AddNewConnectionAllowingCyclic(Genome& genome) const -> NewlyAddedConnection;
+
+    // Add a new connection between random two nodes in the genome without allowing cyclic network
+    // Direction of the new connection is guaranteed to be forward (distance from the input layer to in-node is smaller than the one for out-node)
+    auto AddNewForwardConnection(Genome& genome) const -> NewlyAddedConnection;
+
+    bool CheckCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
+
+    bool SameConnectionExist(const Genome& genome, NodeGeneId inNode, NodeGeneId outNode) const;
 
     // Perform cross over operation over two genomes and generate a new genome
     // This function assumes that genome1 has a higher fitness value than genome2
-    // Set sameFitness true when genome1 and genome2 have the same fitness values
-    auto CrossOver(const Genome& genome1, const Genome& genome2, bool sameFitness) const -> NEAT::Genome;
+    auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const -> Genome;
 
     // Implementation of generating a new generation
     void GenerateNewGeneration();
 
+    void Mutate(Generation& generation) const;
+
+    // Make sure that the same topological changes have the same id
+    void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes, const NewlyAddedConnections& newConnections) const;
+
+    // Calculate distance between two genomes based on their topologies and weights
+    float CalculateDistance(const Genome& genome1, const Genome& genome2) const;
+
+    // Evaluate a genome and return its fitness
     virtual float Evaluate(const Genome& genom) const;
 
+    // Evaluate value of each node recursively
+    void EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const;
+
+    // Create default genome for the initial generation
     virtual auto CreateDefaultInitialGenome() const -> Genome;
-
-    virtual int GetNumConnectionsInDefaultGenome() const;
-
-    virtual int GetNumNodesInDefaultGenome() const;
 
     auto SelectRandomeGenome() -> Genome&;
 
@@ -198,9 +259,7 @@ protected:
 
     //void RemoveStaleGenes();
 
-    void InitActivationFunc(ConnectionGene& gene) const;
-
-    auto GetConnectionGene(Genome& genome, InnovationId innovId) -> ConnectionGene*;
+    auto GetConnectionGene(Genome& genome, InnovationId innovId) const -> ConnectionGene*;
 
     auto GetConnectionGene(const Genome& genome, InnovationId innovId) const -> const ConnectionGene*;
 
@@ -208,4 +267,9 @@ protected:
 
     template <typename Gene, typename FuncType>
     static int FindGeneBinarySearch(const std::vector<Gene>& genes, uint32_t id, FuncType getIdFunc);
+
+#ifdef _DEBUG
+    bool CheckSanity(const Genome& genome) const;
+#endif
 };
+
