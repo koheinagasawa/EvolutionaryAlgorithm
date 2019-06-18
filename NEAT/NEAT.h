@@ -3,6 +3,7 @@
 #include <vector>
 #include <functional>
 #include <unordered_map>
+#include <map>
 
 // Custom hasher for std::pair
 struct PairHash
@@ -37,14 +38,13 @@ public:
     using ActivationFunc = std::function<float(float)>;
     using FitnessFunc = std::function<float(const Genome&)>;
 
-    using NodeGeneList = std::vector<NodeGene>;
-    using ConnectionGeneList = std::vector<ConnectionGene>;
+    using NodeGeneList = std::unordered_map<NodeGeneId, NodeGene>;
+    using ConnectionGeneList = std::map<InnovationId, ConnectionGene>;
     using GenomeList = std::vector<Genome>;
     using SpeciesList = std::vector<Species>;
-    using NodeConnectionMap = std::unordered_map<NodeGeneId, std::vector<InnovationId>>;
 
     // Definitions of invalid id
-    static const NodeGeneId invalidGeneId = (NodeGeneId)-1;
+    static const NodeGeneId invalidNodeGeneId = (NodeGeneId)-1;
     static const InnovationId invalidInnovationId = (InnovationId)-1;
     static const GenerationId invalidGenerationId = (GenerationId)-1;
 
@@ -61,6 +61,8 @@ public:
         NodeGeneId id;
         NodeGeneType type;
         ActivationFuncId activationFuncId;
+        std::vector<InnovationId> links;
+        bool enabled = false;
     };
 
     struct ConnectionGene
@@ -79,9 +81,6 @@ public:
 
         // List connection genes sorted by their innovation ids
         ConnectionGeneList connectionGenes;
-
-        NodeConnectionMap incomingConnectionList;
-        NodeConnectionMap outgoingConnectionList;
 
         SpeciesId species;
     };
@@ -161,8 +160,8 @@ public:
 
 private:
 
-    mutable InnovationId currentInnovationId = 0;
-    mutable NodeGeneId currentNodeGeneId = 0;
+    InnovationId currentInnovationId = 0;
+    NodeGeneId currentNodeGeneId = 0;
 
 protected:
 
@@ -175,11 +174,15 @@ protected:
 
     using NodePair = std::pair<NodeGeneId, NodeGeneId>;
 
-    struct NewlyAddedNode
+    std::unordered_map<NodePair, ConnectionGene, PairHash> innovationHistory;
+
+    struct NodeAddedInfo
     {
         Genome& genome;
-        NodeGeneId node;
-        InnovationId innovId;
+        NodeGeneId newNode;
+        InnovationId oldConnection;
+        InnovationId newConnection1;
+        InnovationId newConnection2;
     };
 
     struct NewlyAddedConnection
@@ -189,8 +192,7 @@ protected:
         NodePair nodes;
     };
 
-    using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NewlyAddedNode>>;
-    using NewlyAddedConnections = std::unordered_map<NodePair, std::vector<NewlyAddedConnection>, PairHash>;
+    using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NodeAddedInfo>>;
 
     bool isInitialized = false;
 
@@ -198,30 +200,34 @@ protected:
 
     inline auto GetCurrentInnovationId() const -> InnovationId { return currentInnovationId; }
 
-    auto GetNewNodeGeneId() const -> NodeGeneId;
+    auto GetNewNodeGeneId() -> NodeGeneId;
 
-    auto GetNewInnovationId() const -> InnovationId;
+    auto GetNewInnovationId() -> InnovationId;
+
+    auto AddNewNode(Genome& genome, NodeGeneType type) -> NodeGene;
+
+    auto Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float weight) -> InnovationId;
+
+private:
 
     // Add a new node at a random connection in the genome
-    auto AddNewNode(Genome& genome) const ->NewlyAddedNode;
-
-    auto GenerateNewNode() const -> NodeGene;
-
-    auto Connect(NodeGeneId inNode, NodeGeneId outNode, float weight, Genome& genome) const -> InnovationId;
+    auto AddNewNode(Genome& genome) ->NodeAddedInfo;
 
     // Add a new connection between random two nodes in the genome
-    auto AddNewConnection(Genome& genome) const -> NewlyAddedConnection;
+    void AddNewConnection(Genome& genome);
 
     // Add a new connection between random two nodes in the genome allowing cyclic network
-    auto AddNewConnectionAllowingCyclic(Genome& genome) const -> NewlyAddedConnection;
+    void AddNewConnectionAllowingCyclic(Genome& genome);
 
     // Add a new connection between random two nodes in the genome without allowing cyclic network
     // Direction of the new connection is guaranteed to be forward (distance from the input layer to in-node is smaller than the one for out-node)
-    auto AddNewForwardConnection(Genome& genome) const -> NewlyAddedConnection;
+    void AddNewForwardConnection(Genome& genome);
+
+    auto GetNodeCandidatesAsOutNodeOfNewConnection(const Genome& genome) const -> std::vector<NodeGeneId>;
+
+    void DisableConnection(Genome& genome, ConnectionGene& connection) const;
 
     bool CheckCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
-
-    bool SameConnectionExist(const Genome& genome, NodeGeneId inNode, NodeGeneId outNode) const;
 
     // Perform cross over operation over two genomes and generate a new genome
     // This function assumes that genome1 has a higher fitness value than genome2
@@ -230,13 +236,15 @@ protected:
     // Implementation of generating a new generation
     void GenerateNewGeneration();
 
-    void Mutate(Generation& generation) const;
+    void Mutate(Generation& generation);
 
     // Make sure that the same topological changes have the same id
-    void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes, const NewlyAddedConnections& newConnections) const;
+    void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes);
 
     // Calculate distance between two genomes based on their topologies and weights
     float CalculateDistance(const Genome& genome1, const Genome& genome2) const;
+
+protected:
 
     // Evaluate a genome and return its fitness
     virtual float Evaluate(const Genome& genom) const;
@@ -263,13 +271,10 @@ protected:
 
     auto GetConnectionGene(const Genome& genome, InnovationId innovId) const -> const ConnectionGene*;
 
+    auto GetNodeGene(Genome& genome, NodeGeneId id) const -> NodeGene*;
+
     auto GetNodeGene(const Genome& genome, NodeGeneId id) const -> const NodeGene*;
 
-    template <typename Gene, typename FuncType>
-    static int FindGeneBinarySearch(const std::vector<Gene>& genes, uint32_t id, FuncType getIdFunc);
-
-#ifdef _DEBUG
     bool CheckSanity(const Genome& genome) const;
-#endif
 };
 

@@ -41,6 +41,11 @@ auto NEAT::Initialize(const Configration& configIn) -> const Generation &
         const Genome& g = generation.genomes[0];
         currentInnovationId = g.connectionGenes.size();
         currentNodeGeneId = g.nodeGenes.size();
+
+        for (const auto& elem : g.connectionGenes)
+        {
+            innovationHistory[NodePair{ elem.second.inNode, elem.second.outNode }] = elem.second;
+        }
     }
 
     if (config.activateFunctions.size() == 0 || config.activateFunctions.size() <= config.defaultActivateFunctionId)
@@ -107,28 +112,53 @@ void NEAT::PrintFitness() const
 }
 
 
-auto NEAT::GetNewNodeGeneId() const -> NodeGeneId
+auto NEAT::GetNewNodeGeneId() -> NodeGeneId
 {
     // TODO: Make it thread safe
     return currentNodeGeneId++;
 }
 
-auto NEAT::GetNewInnovationId() const -> InnovationId
+auto NEAT::GetNewInnovationId() -> InnovationId
 {
     // TODO: Make it thread safe
     return currentInnovationId++;
 }
 
+auto NEAT::AddNewNode(Genome& genome, NodeGeneType type) -> NodeGene
+{
+    NodeGene node{ GetNewNodeGeneId(), type };
+
+    if (config.useGlobalActivationFunc)
+    {
+        node.activationFuncId = defaultActivationFuncId;
+    }
+    else
+    {
+        // Set a random activation func
+        RandomIntDistribution<uint32_t> distribution(0, activationFuncs.size());
+        node.activationFuncId = distribution(randomGenerator);
+    }
+
+    node.enabled = true;
+
+    genome.nodeGenes[node.id] = node;
+
+    assert(CheckSanity(genome));
+
+    return node;
+}
+
 // Add a new node at a random connection
-auto NEAT::AddNewNode(Genome& genome) const -> NewlyAddedNode
+auto NEAT::AddNewNode(Genome& genome) -> NodeAddedInfo
 {
     // Collect all connections where we can add new node first
     std::vector<InnovationId> availableConnections;
     {
         availableConnections.reserve(genome.connectionGenes.size());
 
-        for (const ConnectionGene& gene : genome.connectionGenes)
+        for (const auto& elem : genome.connectionGenes)
         {
+            const ConnectionGene& gene = elem.second;
             if (gene.enabled)
             {
                 availableConnections.push_back(gene.innovId);
@@ -139,14 +169,13 @@ auto NEAT::AddNewNode(Genome& genome) const -> NewlyAddedNode
         if (availableConnections.size() == 0)
         {
             // TODO: Output a useful message
-            return NewlyAddedNode{genome, invalidGenerationId, invalidInnovationId};
+            return NodeAddedInfo{genome, invalidNodeGeneId};
         }
     }
 
     // Create a new node
-    NodeGene newNode = GenerateNewNode();
+    NodeGene newNode = AddNewNode(genome, NodeGeneType::Hidden);
     const NodeGeneId newNodeId = newNode.id;
-    genome.nodeGenes.push_back(newNode);
 
     // Choose a random connection gene from the available ones
     const InnovationId innovId = SelectRandomConnectionGene(availableConnections);
@@ -163,267 +192,263 @@ auto NEAT::AddNewNode(Genome& genome) const -> NewlyAddedNode
     const float weight = gene->weight;
 
     // Create a new connection between the inNode and the new node
-    Connect(inNode, newNodeId, weight, genome);
+    InnovationId newCon1 = Connect(genome, inNode, newNodeId, weight);
 
     // Create a new connection between the new node and the outNode
-    Connect(newNodeId, outNode, 1.f, genome);
+    InnovationId newCon2 = Connect(genome, newNodeId, outNode, 1.f);
 
-    return NewlyAddedNode{ genome, newNodeId, innovId };
+    assert(CheckSanity(genome));
+
+    return NodeAddedInfo{ genome, newNodeId, innovId, newCon1, newCon2 };
 }
 
-auto NEAT::GenerateNewNode() const -> NodeGene
-{
-    NodeGene node{ GetNewNodeGeneId(), NodeGeneType::Hidden };
-
-    if (config.useGlobalActivationFunc)
-    {
-        node.activationFuncId = defaultActivationFuncId;
-    }
-    else
-    {
-        // Set a random activation func
-        RandomIntDistribution<uint32_t> distribution(0, activationFuncs.size());
-        node.activationFuncId = distribution(randomGenerator);
-    }
-    return node;
-}
-
-auto NEAT::Connect(NodeGeneId inNode, NodeGeneId outNode, float weight, Genome& genome) const -> InnovationId
+auto NEAT::Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float weight) -> InnovationId
 {
     assert(GetNodeGene(genome, inNode));
     assert(GetNodeGene(genome, outNode));
 
     ConnectionGene gene;
-    gene.innovId = GetNewInnovationId();
     gene.inNode = inNode;
     gene.outNode = outNode;
+
+    NodePair pair(inNode, outNode);
+    if (innovationHistory.find(pair) == innovationHistory.end())
+    {
+        gene.innovId = GetNewInnovationId();
+        innovationHistory[pair] = gene;
+    }
+    else
+    {
+        gene.innovId = innovationHistory[pair].innovId;
+    }
+
     gene.enabled = true;
     gene.weight = weight;
-    genome.connectionGenes.push_back(gene);
-    genome.incomingConnectionList[outNode].push_back(gene.innovId);
-    genome.outgoingConnectionList[inNode].push_back(gene.innovId);
+    assert(genome.connectionGenes.find(gene.innovId) == genome.connectionGenes.end());
+    genome.connectionGenes[gene.innovId] = gene;
+
+    NodeGene* on = GetNodeGene(genome, outNode);
+    on->links.push_back(gene.innovId);
 
     return gene.innovId;
 }
 
 // Add a new connection between random two nodes
-auto NEAT::AddNewConnection(Genome& genome) const -> NewlyAddedConnection
+void NEAT::AddNewConnection(Genome& genome)
 {
     if (config.allowCyclicNetwork)
     {
-        return AddNewConnectionAllowingCyclic(genome);
+        AddNewConnectionAllowingCyclic(genome);
     }
     else
     {
-        return AddNewForwardConnection(genome);
+        AddNewForwardConnection(genome);
     }
 }
 
 // Add a new connection between random two nodes allowing cyclic network
-auto NEAT::AddNewConnectionAllowingCyclic(Genome& genome) const -> NewlyAddedConnection
+void NEAT::AddNewConnectionAllowingCyclic(Genome& genome)
 {
-    // Collect all node genes where we can add a new connection gene first
-    std::vector<NodeGeneId> availableNodes;
+    // Select out node first
+    NodeGene* outNode = nullptr;
     {
-        const size_t numNodes = genome.nodeGenes.size();
-        for (const NodeGene& node : genome.nodeGenes)
-        {
-            if (genome.outgoingConnectionList[node.id].size() < numNodes)
-            {
-                availableNodes.push_back(node.id);
-            }
-        }
+        // Collect all node genes where we can add a new connection gene first
+        std::vector<NodeGeneId> nodeCandidates = GetNodeCandidatesAsOutNodeOfNewConnection(genome);
 
         // Return when there's no available node to add a new connection
-        if (availableNodes.size() == 0)
+        if (nodeCandidates.size() > 0)
         {
-            // TODO: Output a useful message
-            return NewlyAddedConnection{ genome, invalidInnovationId, NodePair() };
+            // Select a random node from the available ones as inNode
+            outNode = GetNodeGene(genome, SelectRandomNodeGene(nodeCandidates));
         }
     }
 
-    // Select a random node from the available ones as inNode
-    const NodeGeneId node1 = SelectRandomNodeGene(availableNodes);
-
-    // Then collect all node genes which are not connected to the inNode
+    if (!outNode)
     {
-        availableNodes.clear();
+        // TODO: Output a useful message
+        return;
+    }
+
+    NodeGeneId outNodeId = outNode->id;
+    NodeGeneId inNodeId = invalidNodeGeneId;
+    {
+        std::vector<NodeGeneId> nodeCandidates;
+        // Then collect all node genes which are not connected to the outNode
+        {
+            std::vector<int> connectedFlag;
+            // TODO: This bit array could be way bigger than necessary. Replace it with a better solution.
+            connectedFlag.resize((GetCurrentNodeGeneId() / sizeof(int)) + 1, 0);
+
+            for (auto innovId : outNode->links)
+            {
+                const ConnectionGene* cgene = GetConnectionGene(genome, innovId);
+                assert(cgene);
+                const NodeGeneId nodeId = cgene->inNode;
+                connectedFlag[nodeId / sizeof(int)] |= (1 << (nodeId % sizeof(int)));
+            }
+
+            // Find all nodes not connected to node1
+            for (const auto& elem : genome.nodeGenes)
+            {
+                const NodeGene& node = elem.second;
+                if (node.id == outNodeId ||
+                    node.type == NodeGeneType::Output ||
+                    !node.enabled)
+                {
+                    continue;
+                }
+
+                if (((connectedFlag[node.id / sizeof(int)] >> (node.id % sizeof(int))) & 1) == 0)
+                {
+                    nodeCandidates.push_back((NodeGeneId)node.id);
+                }
+            }
+        }
+
+        // availableNodes must not empty here because node1 has at least one other node which it's not connected to
+        assert(nodeCandidates.size() > 0);
+
+        // Select a random node from the available ones as outNode
+        inNodeId = SelectRandomNodeGene(nodeCandidates);
+    }
+
+    // Add a new connection
+    RandomRealDistribution<float> floatDistribution(-1.f, 1.f);
+    auto innovId = Connect(genome, inNodeId, outNodeId, floatDistribution(randomGenerator));
+
+    // Make sure that outNode is enabled
+    outNode->enabled = true;
+
+    assert(CheckSanity(genome));
+}
+
+// Add a new connection between random two nodes without allowing cyclic network
+// Direction of the new connection is guaranteed to be one direction (distance from in node to an input node is smaller than the one of out node)
+void NEAT::AddNewForwardConnection(Genome& genome)
+{
+    // Collect all node genes where we can add a new connection gene first
+    std::vector<NodeGeneId> outNodeCandidates = GetNodeCandidatesAsOutNodeOfNewConnection(genome);
+
+        // Return when there's no available node to add a new connection
+    if (outNodeCandidates.size() == 0)
+    {
+        // TODO: Output a useful message message
+        return;
+    }
+
+    // Randomize the order of available nodes in the array
+    std::random_shuffle(outNodeCandidates.begin(), outNodeCandidates.end());
+
+    NodeGeneId inNodeId = invalidNodeGeneId;
+    NodeGeneId outNodeId = invalidNodeGeneId;
+    for (auto onid : outNodeCandidates)
+    {
+        const NodeGene* outNode = GetNodeGene(genome, onid);
+
+        std::vector<NodeGeneId> inNodeCandidates;
 
         std::vector<int> connectedFlag;
         // TODO: This bit array could be way bigger than necessary. Replace it with a better solution.
-        connectedFlag.resize((GetCurrentNodeGeneId() / sizeof(int)) + 1, 0);
+        connectedFlag.resize(GetCurrentNodeGeneId() / sizeof(int) + 1, 0);
 
-        for (auto innovId : genome.outgoingConnectionList.at(node1))
+        for (auto innovId : outNode->links)
         {
             const ConnectionGene* cgene = GetConnectionGene(genome, innovId);
             assert(cgene);
-            const NodeGeneId nodeId = cgene->outNode;
+            const NodeGeneId nodeId = cgene->inNode;
             connectedFlag[nodeId / sizeof(int)] |= (1 << (nodeId % sizeof(int)));
         }
 
-        // Find all nodes not connected to node1
-        for (const NodeGene& node : genome.nodeGenes)
+        for (const auto& elem : genome.nodeGenes)
         {
-            if (node.type != NodeGeneType::Hidden && node.type != NodeGeneType::Output)
-            {
-                continue;
-            }
-
-            if (SameConnectionExist(genome, node1, node.id))
+            const NodeGene& node = elem.second;
+            if (node.id == outNodeId ||
+                node.type == NodeGeneType::Output ||
+                !node.enabled)
             {
                 continue;
             }
 
             if (((connectedFlag[node.id / sizeof(int)] >> (node.id % sizeof(int))) & 1) == 0)
             {
-                availableNodes.push_back((NodeGeneId)node.id);
-            }
-        }
-    }
-
-    // availableNodes must not empty here because node1 has at least one other node which it's not connected to
-    assert(availableNodes.size() > 0);
-    // Select a random node from the available ones as outNode
-    NodeGeneId node2 = SelectRandomNodeGene(availableNodes);
-
-    // Easier but not reliable way. It could be faster when there are only a few connections.
-    //do
-    //{
-    //    node1 = SelectRandomNodeGene(genome);
-    //    node2 = SelectRandomNodeGene(genome);
-    //}
-    //while (node1 == node2 || ConnectionExists(genome, node1, node2));
-
-    // Add a new connection
-    ConnectionGene newConnection;
-    auto innovId = GetNewInnovationId();
-    newConnection.innovId = innovId;
-    newConnection.inNode = node1;
-    newConnection.outNode = node2;
-    RandomRealDistribution<float> floatDistribution(-1.f, 1.f);
-    newConnection.weight = floatDistribution(randomGenerator);
-    newConnection.enabled = true;
-    genome.connectionGenes.push_back(newConnection);
-
-    // Update relationship between nodes and connections
-    genome.outgoingConnectionList[node1].push_back(innovId);
-    genome.incomingConnectionList[node2].push_back(innovId);
-
-#ifdef _DEBUG
-    CheckSanity(genome);
-#endif
-
-    return NewlyAddedConnection{ genome, innovId, NodePair{node1, node2} };
-}
-
-// Add a new connection between random two nodes without allowing cyclic network
-// Direction of the new connection is guaranteed to be one direction (distance from in node to an input node is smaller than the one of out node)
-auto NEAT::AddNewForwardConnection(Genome& genome) const -> NewlyAddedConnection
-{
-    // Collect all node genes where we can add a new connection gene first
-    std::vector<NodeGeneId> availableInNodes;
-    {
-        const size_t numNodes = genome.nodeGenes.size();
-        for (const auto& node : genome.nodeGenes)
-        {
-            if (node.type != NodeGeneType::Output &&
-                genome.outgoingConnectionList[node.id].size() < numNodes)
-            {
-                availableInNodes.push_back(node.id);
-            }
-        }
-
-        // Return when there's no available node to add a new connection
-        if (availableInNodes.size() == 0)
-        {
-            // TODO: Output a useful message message
-            return NewlyAddedConnection{ genome, invalidInnovationId, NodePair() };
-        }
-    }
-
-    // Randomize the order of available nodes in the array
-    std::random_shuffle(availableInNodes.begin(), availableInNodes.end());
-
-    NodeGeneId node1 = invalidGeneId;
-    NodeGeneId node2 = invalidGeneId;
-    for (auto node : availableInNodes)
-    {
-        std::vector<NodeGeneId> availableOutNodes;
-
-        std::vector<int> connectedFlag;
-        // TODO: This bit array could be way bigger than necessary. Replace it with a better solution.
-        connectedFlag.resize(GetCurrentNodeGeneId() / sizeof(int) + 1, 0);
-
-        for (auto innovId : genome.outgoingConnectionList[node])
-        {
-            const ConnectionGene* cgene = GetConnectionGene(genome, innovId);
-            assert(cgene);
-            const NodeGeneId nodeId = cgene->outNode;
-            connectedFlag[nodeId / sizeof(int)] |= (1 << (nodeId % sizeof(int)));
-        }
-
-        for (const auto& n : genome.nodeGenes)
-        {
-            if (n.type != NodeGeneType::Hidden && n.type != NodeGeneType::Output)
-            {
-                continue;
-            }
-
-            if (SameConnectionExist(genome, node1, n.id))
-            {
-                continue;
-            }
-
-            if (((connectedFlag[n.id / sizeof(int)] >> (n.id % sizeof(int))) & 1) == 0)
-            {
-                if (CheckCyclic(genome, node, n.id))
+                if (CheckCyclic(genome, node.id, onid))
                 {
-                    availableOutNodes.push_back(n.id);
+                    inNodeCandidates.push_back(node.id);
                 }
             }
         }
 
-        if (availableOutNodes.size() == 0)
+        if (inNodeCandidates.size() == 0)
         {
             // No available node where we can create a forward connection found
             continue;
         }
 
-        node1 = node;
+        outNodeId = onid;
         // Select a random node from the available ones as outNode
-        node2 = SelectRandomNodeGene(availableOutNodes);
+        inNodeId = SelectRandomNodeGene(inNodeCandidates);
 
-        // TODO: Come up with a better solution here.
-        // We should be able to simply swap node1 and node2 when node2 has a bigger depth.
+        break;
     }
 
     // Return when there's no available nodes
-    if (node1 == invalidGeneId)
+    if (outNodeId == invalidNodeGeneId)
     {
         // TODO: Output a useful message
-        return NewlyAddedConnection{ genome, invalidInnovationId, NodePair() };
+        return;
     }
 
     // Add a new connection
-    ConnectionGene newConnection;
-    auto innovId = GetNewInnovationId();
-    newConnection.innovId = innovId;
-    newConnection.inNode = node1;
-    newConnection.outNode = node2;
     RandomRealDistribution<float> floatDistribution(-1.f, 1.f);
-    newConnection.weight = floatDistribution(randomGenerator);
-    newConnection.enabled = true;
-    genome.connectionGenes.push_back(newConnection);
+    auto innovId = Connect(genome, inNodeId, outNodeId, floatDistribution(randomGenerator));
 
-    // Update relationship between nodes and connections
-    genome.outgoingConnectionList[node1].push_back(innovId);
-    genome.incomingConnectionList[node2].push_back(innovId);
+    // Make sure that outNode is enabled
+    NodeGene* outNode = GetNodeGene(genome, outNodeId);
+    outNode->enabled = true;
 
-#ifdef _DEBUG
-    CheckSanity(genome);
-#endif
+    assert(CheckSanity(genome));
+}
 
-    return NewlyAddedConnection{ genome, innovId, NodePair{node1, node2} };
+auto NEAT::GetNodeCandidatesAsOutNodeOfNewConnection(const Genome& genome) const -> std::vector<NodeGeneId>
+{
+    // Collect all node genes where we can add a new connection gene
+    std::vector<NodeGeneId> out;
+    const size_t numNodes = genome.nodeGenes.size();
+    for (const auto& elem : genome.nodeGenes)
+    {
+        const NodeGene& node = elem.second;
+        if (node.type != NodeGeneType::Input &&
+            node.type != NodeGeneType::Bias &&
+            node.links.size() < numNodes)
+        {
+            out.push_back(node.id);
+        }
+    }
+    return out;
+}
+
+void NEAT::DisableConnection(Genome& genome, ConnectionGene& connection) const
+{
+    connection.enabled = false;
+    NodeGene* outNode = GetNodeGene(genome, connection.outNode);
+    assert(outNode);
+
+    if (outNode->type == NodeGeneType::Input || outNode->type == NodeGeneType::Bias)
+    {
+        return;
+    }
+
+    // If the output node has no more enabled connections, disable it.
+    for (auto innovId : outNode->links)
+    {
+        if (GetConnectionGene(genome, innovId)->enabled)
+        {
+            return;
+        }
+    }
+    outNode->enabled = false;
+
+    return;
 }
 
 bool NEAT::CheckCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const
@@ -440,18 +465,20 @@ bool NEAT::CheckCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targ
     stack.push(srcNode);
     while (!stack.empty())
     {
-        const NodeGeneId n = stack.top();
+        const NodeGene* node = GetNodeGene(genome, stack.top());
+        if (!node) break;
+
         stack.pop();
 
-        if (genome.incomingConnectionList.find(n) == genome.incomingConnectionList.end())
-        {
-            continue;
-        }
-
-        for (const InnovationId innovId : genome.incomingConnectionList.at(n))
+        for (const InnovationId innovId : node->links)
         {
             const ConnectionGene* con = GetConnectionGene(genome, innovId);
             assert(con);
+
+            if (!con->enabled)
+            {
+                continue;
+            }
 
             const NodeGeneId inNode = con->inNode;
 
@@ -473,18 +500,6 @@ bool NEAT::CheckCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targ
     return true;
 }
 
-bool NEAT::SameConnectionExist(const Genome& genome, NodeGeneId inNode, NodeGeneId outNode) const
-{
-    for (const auto& con : genome.connectionGenes)
-    {
-        if (con.inNode == inNode && con.outNode == outNode)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Perform cross over operation over two genomes and generate a new genome
 // This function assumes that genome1 has a higher fitness value than genome2
 // Set sameFitness true when genome1 and genome2 have the same fitness values
@@ -504,13 +519,17 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
 
     auto TryAddConnection = [this, &child](const ConnectionGene& connection, bool enable)
     {
-        if (!SameConnectionExist(child, connection.inNode, connection.outNode) &&
-            (config.allowCyclicNetwork || CheckCyclic(child, connection.inNode, connection.outNode)))
+        child.nodeGenes[connection.inNode].id = connection.inNode;
+        child.nodeGenes[connection.outNode].id = connection.outNode;
+
+        if (config.allowCyclicNetwork || CheckCyclic(child, connection.inNode, connection.outNode))
         {
-            child.connectionGenes.push_back(connection);
-            child.connectionGenes.back().enabled = enable;
-            child.incomingConnectionList[connection.outNode].push_back(connection.innovId);
-            child.outgoingConnectionList[connection.inNode].push_back(connection.innovId);
+            ConnectionGene newCon = connection;
+            newCon.enabled = enable;
+            child.connectionGenes[newCon.innovId] = newCon;
+
+            child.nodeGenes[connection.outNode].links.push_back(connection.innovId);
+            child.nodeGenes[connection.outNode].enabled = true;
         }
     };
 
@@ -521,19 +540,16 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
 
         const auto& cGenes1 = parent1->connectionGenes;
         const auto& cGenes2 = parent2->connectionGenes;
-        const size_t numConnectionsP1 = cGenes1.size();
-        const size_t numConnectionsP2 = cGenes2.size();
 
-        child.connectionGenes.reserve(std::min(numConnectionsP1, numConnectionsP2));
-
-        size_t ip1 = 0, ip2 = 0;
+        auto itr1 = cGenes1.begin();
+        auto itr2 = cGenes2.begin();
 
         // Select each gene from either parent based on gene's innovation id and parents' fitness
         // Note that cGenes1/2 are sorted by innovation id
-        while (ip1 < numConnectionsP1 && ip2 < numConnectionsP2)
+        while (itr1 != cGenes1.end() && itr2 != cGenes2.end())
         {
-            const ConnectionGene& cGene1 = cGenes1[ip1];
-            const ConnectionGene& cGene2 = cGenes2[ip2];
+            const ConnectionGene& cGene1 = itr1->second;
+            const ConnectionGene& cGene2 = itr2->second;
             const ConnectionGene* geneToInherite = nullptr;
 
             bool enabled = true;
@@ -554,8 +570,8 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
                     }
                 }
 
-                ++ip1;
-                ++ip2;
+                ++itr1;
+                ++itr2;
             }
             else
             {
@@ -563,13 +579,13 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
                 if (cGene1.innovId < cGene2.innovId)
                 {
                     geneToInherite = !sameFitness || random(randomGenerator) ? &cGene1 : nullptr;
-                    ++ip1;
+                    ++itr1;
                 }
                 // If this gene existss only in parent2, don't inherite it
                 else
                 {
                     geneToInherite = sameFitness && random(randomGenerator) ? &cGene2 : nullptr;
-                    ++ip2;
+                    ++itr2;
                 }
             }
 
@@ -582,81 +598,56 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
 
         // Add remaining genes
         {
-            auto addRemainingGenes = [this, sameFitness, &child, TryAddConnection](size_t index, size_t num, const ConnectionGeneList& genes, bool inherite)
+            auto addRemainingGenes = [this, sameFitness, &child, &random, TryAddConnection](ConnectionGeneList::iterator itr, const ConnectionGeneList& genes)
             {
-                while (index < num)
+                while (itr != genes.end())
                 {
-                    if (inherite)
+                    if (sameFitness && random(randomGenerator))
                     {
-                        TryAddConnection(genes[index], genes[index].enabled);
+                        TryAddConnection(itr->second, itr->second.enabled);
                     }
-                    ++index;
+                    ++itr;
                 }
             };
 
-            if (ip1 < numConnectionsP1)
+            while (itr1 != cGenes1.end())
             {
-                if (!sameFitness || random(randomGenerator))
+                if (!sameFitness && random(randomGenerator))
                 {
-                    addRemainingGenes(ip1, numConnectionsP1, cGenes1, true);
+                    TryAddConnection(itr1->second, itr1->second.enabled);
                 }
+                ++itr1;
             }
-            else if (ip2 < numConnectionsP2)
+            while (itr2 != cGenes2.end())
             {
                 if (sameFitness && random(randomGenerator))
                 {
-                    addRemainingGenes(ip2, numConnectionsP2, cGenes2, sameFitness);
+                    TryAddConnection(itr2->second, itr2->second.enabled);
                 }
+                ++itr2;
             }
         }
     }
 
     // Add node genes to the child genome
+
+    for (auto& elem : child.nodeGenes)
     {
-        // Create a map of NodeGenes and their ids first
-        std::unordered_map<NodeGeneId, NodeGene> nodeGenes;
+        const NodeGene* pn = GetNodeGene(*parent1, elem.first);
+        if (!pn)
         {
-            auto addNodeGeneIfNotExist = [&nodeGenes, &parent1, &parent2, this](NodeGeneId id)
-            {
-                if (nodeGenes.find(id) == nodeGenes.end())
-                {
-                    NodeGene newNode;
-                    newNode.id = id;
-                    const NodeGene* pn = GetNodeGene(*parent1, id);
-                    if (!pn)
-                    {
-                        pn = GetNodeGene(*parent2, id);
-                    }
-                    newNode.type = pn->type;
-                    newNode.activationFuncId = pn->activationFuncId;
-                    nodeGenes[id] = newNode;
-                }
-            };
-
-            for (const auto& connectionGene : child.connectionGenes)
-            {
-                addNodeGeneIfNotExist(connectionGene.inNode);
-                addNodeGeneIfNotExist(connectionGene.outNode);
-            }
+            pn = GetNodeGene(*parent2, elem.first);
         }
+        elem.second.type = pn->type;
+        elem.second.activationFuncId = pn->activationFuncId;
 
-        // Add all the node genes to the child genome
-        child.nodeGenes.reserve(nodeGenes.size());
-        for (const auto& elem : nodeGenes)
+        if (elem.second.type == NodeGeneType::Input || elem.second.type == NodeGeneType::Bias)
         {
-            child.nodeGenes.push_back(elem.second);
+            elem.second.enabled = true;
         }
-
-        std::sort(child.nodeGenes.begin(), child.nodeGenes.end(),
-            [](const NodeGene& a, const NodeGene& b)
-            {
-                return a.id < b.id;
-            });
     }
 
-#ifdef _DEBUG
-    CheckSanity(child);
-#endif
+    assert(CheckSanity(child));
 
     return child;
 }
@@ -765,17 +756,17 @@ void NEAT::GenerateNewGeneration()
     generation.generationId++;
 }
 
-void NEAT::Mutate(Generation& g) const
+void NEAT::Mutate(Generation& g)
 {
     RandomRealDistribution<float> randomf(-1.f, 1.f);
     NewlyAddedNodes newNodes;
-    NewlyAddedConnections newConnections;
 
     // Mutation weights
     for (auto& genome : g.genomes)
     {
-        for (auto& connection : genome.connectionGenes)
+        for (auto& elem : genome.connectionGenes)
         {
+            ConnectionGene& connection = elem.second;
             // Invoke mutation at random rate
             if (randomf(randomGenerator) <= config.weightMutationRate)
             {
@@ -799,138 +790,76 @@ void NEAT::Mutate(Generation& g) const
         // Add a new node at random rate
         if (randomf(randomGenerator) <= config.nodeAdditionRate)
         {
-            NewlyAddedNode node = AddNewNode(genome);
-            if (node.node != invalidGeneId)
+            NodeAddedInfo node = AddNewNode(genome);
+            if (node.newNode != invalidNodeGeneId)
             {
-                newNodes[node.innovId].push_back(node);
-            }
-        }
-
-        // Add a new connection at random rate
-        if (randomf(randomGenerator) <= config.connectionAdditionRate)
-        {
-            NewlyAddedConnection con = AddNewConnection(genome);
-            if (con.innovId != invalidInnovationId)
-            {
-                newConnections[con.nodes].push_back(con);
+                newNodes[node.oldConnection].push_back(node);
             }
         }
     }
 
-    EnsureUniqueGeneIndices(newNodes, newConnections);
+    EnsureUniqueGeneIndices(newNodes);
+
+    for (auto& genome : g.genomes)
+    {
+        // Add a new connection at random rate
+        if (randomf(randomGenerator) <= config.connectionAdditionRate)
+        {
+            AddNewConnection(genome);
+        }
+    }
 }
 
 // Make sure that the same topological changes have the same id
-void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes, const NewlyAddedConnections& newConnections) const
+void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes)
 {
     // Check duplicated newly added node genes
     for (auto& elem : newNodes)
     {
         auto& genomes = elem.second;
-        NodeGeneId id = genomes[0].node;
+        const auto& info = genomes[0];
+
+        NodeGeneId inNode = info.genome.connectionGenes[info.oldConnection].inNode;
+        NodeGeneId outNode = info.genome.connectionGenes[info.oldConnection].outNode;
+
         for (size_t i = 1; i < genomes.size(); ++i)
         {
-            NodeGeneId thisId = genomes[i].node;
+            const auto thisInfo = genomes[i];
             Genome& genome = genomes[i].genome;
 
-            // Here, we are assuming that only one new node can be added by mutation at a genome in a single generation
-            // Both node genes are just added in this generation, so their id should be greater than any of existing node gene.
-            // So node gene should be still sorted even after this operation.
-            assert(genome.nodeGenes[genome.nodeGenes.size() - 1].id == thisId);
-            genome.nodeGenes[genome.nodeGenes.size() - 1].id = id;
+            assert(genome.nodeGenes.find(info.newNode) == genome.nodeGenes.end());
+            genome.nodeGenes[info.newNode] = genome.nodeGenes[thisInfo.newNode];
+            genome.nodeGenes[info.newNode].id = info.newNode;
+            genome.nodeGenes.erase(thisInfo.newNode);
 
-            // Again here, we are assuming that only at most three connection genes can be added by mutation at a genome in a single generation
-            // So it's enough to check the last three connection genes to update
-            int firstIndex = genome.connectionGenes.size() - 3;
-            if (firstIndex < 0) firstIndex = 0;
-            for (size_t i = firstIndex; i < genome.connectionGenes.size(); ++i)
+            assert(genome.nodeGenes[info.newNode].links.size() == 1);
+            genome.nodeGenes[info.newNode].links[0] = info.newConnection1;
+
+            assert(genome.connectionGenes.find(info.newConnection1) == genome.connectionGenes.end());
+            genome.connectionGenes[info.newConnection1] = genome.connectionGenes[thisInfo.newConnection1];
+            genome.connectionGenes[info.newConnection1].innovId = info.newConnection1;
+            genome.connectionGenes[info.newConnection1].outNode = info.newNode;
+            genome.connectionGenes.erase(thisInfo.newConnection1);
+
+            assert(genome.connectionGenes.find(info.newConnection2) == genome.connectionGenes.end());
+            genome.connectionGenes[info.newConnection2] = genome.connectionGenes[thisInfo.newConnection2];
+            genome.connectionGenes[info.newConnection2].innovId = info.newConnection2;
+            genome.connectionGenes[info.newConnection2].inNode = info.newNode;
+            genome.connectionGenes.erase(thisInfo.newConnection2);
+
+            for (size_t i = 0; i < genome.nodeGenes[outNode].links.size(); ++i)
             {
-                auto& connection = genome.connectionGenes[i];
-                if (connection.inNode == thisId)
+                if (genome.nodeGenes[outNode].links[i] == thisInfo.newConnection2)
                 {
-                    connection.inNode = id;
-                }
-                if (connection.outNode == thisId)
-                {
-                    connection.outNode = id;
+                    genome.nodeGenes[outNode].links[i] = info.newConnection2;
+                    break;
                 }
             }
 
-            // Reassign node connection map to the new node gene id
-            assert(genome.incomingConnectionList.find(thisId) != genome.incomingConnectionList.end());
-            assert(genome.incomingConnectionList.find(id) == genome.incomingConnectionList.end());
-            assert(genome.outgoingConnectionList.find(thisId) != genome.outgoingConnectionList.end());
-            assert(genome.outgoingConnectionList.find(id) == genome.outgoingConnectionList.end());
-            genome.incomingConnectionList[id] = genome.incomingConnectionList[thisId];
-            genome.incomingConnectionList.erase(thisId);
-            genome.outgoingConnectionList[id] = genome.outgoingConnectionList[thisId];
-            genome.outgoingConnectionList.erase(thisId);
+            innovationHistory.erase(NodePair{ inNode, thisInfo.newNode });
+            innovationHistory.erase(NodePair{ thisInfo.newNode, outNode });
 
-#ifdef _DEBUG
-            CheckSanity(genome);
-#endif
-        }
-    }
-
-    // Check duplicated newly added connection ids
-    for (auto& elem : newConnections)
-    {
-        auto& genomes = elem.second;
-        InnovationId id = genomes[0].innovId;
-        for (size_t i = 1; i < genomes.size(); ++i)
-        {
-            InnovationId thisId = genomes[i].innovId;
-            Genome& genome = genomes[i].genome;
-
-            {
-                // Again here, we are assuming that only at most three connection genes can be added by mutation at a genome in a single generation
-                // So it's enough to check the last three connection genes to update
-                int firstIndex = genome.connectionGenes.size() - 3;
-                if (firstIndex < 0) firstIndex = 0;
-                for (size_t i = firstIndex; i < genome.connectionGenes.size(); ++i)
-                {
-                    auto& connection = genome.connectionGenes[i];
-                    if (connection.innovId == thisId)
-                    {
-                        connection.innovId = id;
-                    }
-                }
-
-                // This time, innovation ids for the last three connection can be not sorted anymore.
-                // So we sort them.
-                for (size_t i = firstIndex + 1; i < genome.connectionGenes.size(); ++i)
-                {
-                    size_t j = i;
-                    while (genome.connectionGenes[j - 1].innovId > genome.connectionGenes[j].innovId)
-                    {
-                        auto tmp = genome.connectionGenes[j - 1];
-                        genome.connectionGenes[j - 1] = genome.connectionGenes[j];
-                        genome.connectionGenes[j] = tmp;
-                        --j;
-                    }
-                }
-            }
-
-            // Update node connection map
-            auto updateConnectionIdBruteForce = [thisId, id](NodeConnectionMap& map)
-            {
-                for (auto& ids : map)
-                {
-                    for (size_t j = 0; j < ids.second.size(); ++j)
-                    {
-                        if (ids.second[j] == thisId)
-                        {
-                            ids.second[j] = id;
-                        }
-                    }
-                }
-            };
-            updateConnectionIdBruteForce(genome.incomingConnectionList);
-            updateConnectionIdBruteForce(genome.outgoingConnectionList);
-
-#ifdef _DEBUG
-            CheckSanity(genome);
-#endif
+            assert(CheckSanity(genome));
         }
     }
 }
@@ -942,32 +871,33 @@ float NEAT::CalculateDistance(const Genome& genome1, const Genome& genome2) cons
     const auto& cGenes2 = genome2.connectionGenes;
     const size_t numConnectionsP1 = cGenes1.size();
     const size_t numConnectionsP2 = cGenes2.size();
-    size_t ip1, ip2;
-
     const size_t numConnections = numConnectionsP1 > numConnectionsP2 ? numConnectionsP1 : numConnectionsP2;
     size_t numMismatches = 0;
     float weightDifference = 0.f;
 
-    for (ip1 = 0, ip2 = 0; ip1 < numConnectionsP1 && ip2 < numConnectionsP2;)
+    auto itr1 = cGenes1.begin();
+    auto itr2 = cGenes2.begin();
+
+    while (itr1 != cGenes1.end() && itr2 != cGenes2.end())
     {
-        const ConnectionGene& cGene1 = cGenes1[ip1];
-        const ConnectionGene& cGene2 = cGenes2[ip2];
+        const ConnectionGene& cGene1 = itr1->second;
+        const ConnectionGene& cGene2 = itr2->second;
         if (cGene1.innovId == cGene2.innovId)
         {
             weightDifference += std::fabs(cGene1.weight - cGene2.weight);
-            ++ip1;
-            ++ip2;
+            ++itr1;
+            ++itr2;
         }
         else
         {
             numMismatches++;
             if (cGene1.innovId < cGene2.innovId)
             {
-                ++ip1;
+                ++itr1;
             }
             else
             {
-                ++ip2;
+                ++itr2;
             }
         }
     }
@@ -993,20 +923,26 @@ void NEAT::EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vecto
 
     float val = 0.f;
 
-    if (genome.incomingConnectionList.find(nodeId) != genome.incomingConnectionList.end())
+    const NodeGene* node = GetNodeGene(genome, nodeId);
+
+    if (values.find(nodeId) != values.end())
     {
-        const auto& incomings = genome.incomingConnectionList.at(nodeId);
-        for (auto innovId : incomings)
+        return;
+    }
+
+    for (auto innovId : node->links)
+    {
+        const auto connectionGene = GetConnectionGene(genome, innovId);
+        assert(connectionGene != nullptr);
+
+        if (!connectionGene->enabled) continue;
+
+        auto incomingNodeId = connectionGene->inNode;
+        bool alreadyEvaluating = false;
+
+        if (values.find(incomingNodeId) == values.end())
         {
-            const auto connectionGene = GetConnectionGene(genome, innovId);
-            assert(connectionGene != nullptr);
-
-            if (!connectionGene->enabled) continue;
-
-            auto incomingNodeId = connectionGene->inNode;
-            bool alreadyEvaluating = false;
-
-            if (config.allowCyclicNetwork)
+            //if (config.allowCyclicNetwork)
             {
                 for (NodeGeneId id : evaluatingNodes)
                 {
@@ -1029,9 +965,9 @@ void NEAT::EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vecto
             {
                 evaluatingNodes.resize(evaluatingNodes.size() - 1);
             }
-
-            val += values[incomingNodeId] * connectionGene->weight;
         }
+
+        val += values[incomingNodeId] * connectionGene->weight;
     }
 
     ActivationFuncId activation;
@@ -1052,33 +988,36 @@ auto NEAT::CreateDefaultInitialGenome() const -> Genome
 {
     Genome genome;
 
-    genome.nodeGenes.reserve(3);
-    auto& nodeGenes = genome.nodeGenes;
-
     // Input node
-    nodeGenes.push_back(NodeGene{ 0, NodeGeneType::Input, defaultActivationFuncId });
+    NodeGene input{ 0, NodeGeneType::Input };
+    input.activationFuncId = defaultActivationFuncId;
+    input.enabled = true;
 
-    // Hidden node
-    nodeGenes.push_back(NodeGene{ 1, NodeGeneType::Hidden, defaultActivationFuncId });
+    // Bias node
+    NodeGene bias{ 1, NodeGeneType::Bias };
+    bias.activationFuncId = defaultActivationFuncId;
+    bias.enabled = true;
 
     // Output node
-    nodeGenes.push_back(NodeGene{ 2, NodeGeneType::Output, defaultActivationFuncId });
+    NodeGene output{ 2, NodeGeneType::Output };
+    output.activationFuncId = defaultActivationFuncId;
+    output.enabled = true;
 
-    genome.connectionGenes.reserve(2);
-    auto& connections = genome.connectionGenes;
+    genome.nodeGenes[0] = input;
+    genome.nodeGenes[1] = bias;
+    genome.nodeGenes[2] = output;
 
-    // Create a connection between the input and the hidden node
-    // InnovationId of this connection for default init genom will be always 0
     RandomRealDistribution<float> randomf(-1.f, 1.f);
-    connections.push_back(ConnectionGene{ 0, 0, 1, randomf(randomGenerator), true });
-    genome.outgoingConnectionList[0].push_back(0);
-    genome.incomingConnectionList[1].push_back(0);
-
-    // Create a connection between the hidden and the output node
-    // InnovationId of this connection for default init genom will be always 1
-    connections.emplace_back(ConnectionGene{ 1, 1, 2, randomf(randomGenerator), true });
-    genome.outgoingConnectionList[1].push_back(1);
-    genome.incomingConnectionList[2].push_back(1);
+    {
+        ConnectionGene gene{0, input.id, output.id, randomf(randomGenerator), true};
+        output.links.push_back(0);
+        genome.connectionGenes[0] = gene;
+    }
+    {
+        ConnectionGene gene{ 1, bias.id, output.id, randomf(randomGenerator), true };
+        genome.connectionGenes[1] = gene;
+        output.links.push_back(1);
+    }
 
     return genome;
 }
@@ -1098,168 +1037,68 @@ auto NEAT::SelectRandomNodeGene(const std::vector<NodeGeneId>& genes) const -> N
 auto NEAT::SelectRandomNodeGene(const Genome& genome) const -> NodeGeneId
 {
     RandomIntDistribution<NodeGeneId> distribution(0, genome.nodeGenes.size() - 1);
-    return genome.nodeGenes[distribution(randomGenerator)].id;
+    return std::next(std::begin(genome.nodeGenes), distribution(randomGenerator))->second.id;
 }
 
 auto NEAT::SelectRandomConnectionGene(const std::vector<InnovationId>& genes) const -> InnovationId
 {
     RandomIntDistribution<InnovationId> distribution(0, genes.size() - 1);
-    return genes[distribution(randomGenerator)];
+    return *std::next(std::begin(genes), distribution(randomGenerator));
 }
 
 auto NEAT::SelectRandomConnectionGene(const Genome& genome) const -> InnovationId
 {
     RandomIntDistribution<InnovationId> distribution(0, genome.connectionGenes.size() - 1);
-    return  genome.connectionGenes[distribution(randomGenerator)].innovId;
+    return std::next(std::begin(genome.connectionGenes), distribution(randomGenerator))->second.innovId;
 }
 
 auto NEAT::GetConnectionGene(Genome& genome, InnovationId innovId) const -> ConnectionGene*
 {
-    int index = FindGeneBinarySearch(
-        genome.connectionGenes,
-        innovId,
-        [](const ConnectionGene& gene){ return gene.innovId; });
-    if (index < 0) return nullptr;
-    return &genome.connectionGenes[index];
+    return genome.connectionGenes.find(innovId) != genome.connectionGenes.end() ?
+        &genome.connectionGenes[innovId] :
+        nullptr;
 }
 
 auto NEAT::GetConnectionGene(const Genome& genome, InnovationId innovId) const -> const ConnectionGene*
 {
-    int index = FindGeneBinarySearch(
-        genome.connectionGenes,
-        innovId,
-        [](const ConnectionGene& gene){ return gene.innovId; });
-    if (index < 0) return nullptr;
-    return &genome.connectionGenes[index];
+    return genome.connectionGenes.find(innovId) != genome.connectionGenes.end() ?
+        &genome.connectionGenes.at(innovId) :
+        nullptr;
+}
+
+auto NEAT::GetNodeGene(Genome& genome, NodeGeneId id) const -> NodeGene*
+{
+    return genome.nodeGenes.find(id) != genome.nodeGenes.end() ?
+        &genome.nodeGenes[id] :
+        nullptr;
 }
 
 auto NEAT::GetNodeGene(const Genome& genome, NodeGeneId id) const -> const NodeGene*
 {
-    int index = FindGeneBinarySearch(
-        genome.nodeGenes,
-        id,
-        [](const NodeGene & gene){ return gene.id; });
-    if (index < 0) return nullptr;
-    return &genome.nodeGenes[index];
+    return genome.nodeGenes.find(id) != genome.nodeGenes.end() ?
+        &genome.nodeGenes.at(id) :
+        nullptr;
 }
 
-template <typename Gene, typename FuncType>
-int NEAT::FindGeneBinarySearch(const std::vector<Gene>& genes, uint32_t id, FuncType getIdFunc)
-{
-    int low = 0;
-    int high = genes.size() - 1;
-
-    while (low <= high)
-    {
-        int mid = (low + high) / 2;
-        if (getIdFunc(genes[mid]) == id)
-        {
-            return mid;
-        }
-        else if (getIdFunc(genes[mid]) > id)
-        {
-            high = mid - 1;
-        }
-        else
-        {
-            low = mid + 1;
-        }
-    }
-
-    return -1;
-}
-
-#ifdef _DEBUG
 bool NEAT::CheckSanity(const Genome& genome) const
 {
+#ifdef _DEBUG
     if (!config.enableSanityCheck)
     {
         return true;
     }
 
-    // Check if node gene ids are sorted
-    {
-        const auto& nodes = genome.nodeGenes;
-        const size_t numOfNode = nodes.size();
-        for (size_t i = 1; i < numOfNode; ++i)
-        {
-            if (nodes[i - 1].id >= nodes[i].id)
-            {
-                return false;
-            }
-        }
-    }
-
-    // Check if innovation ids are sorted
-    {
-        const auto& conns = genome.connectionGenes;
-        const size_t numOfConns = conns.size();
-        for (size_t i = 1; i < numOfConns; ++i)
-        {
-            if (conns[i - 1].innovId >= conns[i].innovId)
-            {
-                return false;
-            }
-        }
-    }
-
     // Check if there's no duplicated connection genes for the same in and out nodes
     {
         const auto& conns = genome.connectionGenes;
-        const size_t numOfConns = conns.size();
-        for (size_t i = 0; i < numOfConns; ++i)
+        for (auto itr1 = conns.begin(); itr1 != conns.end(); ++itr1)
         {
-            for (size_t j = i + 1; j < numOfConns; ++j)
+            auto itr2 = itr1;
+            for (++itr2; itr2 != conns.end(); ++itr2)
             {
-                if (conns[i].inNode == conns[j].inNode && conns[i].outNode == conns[j].outNode)
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    // Check if node-connection map is consistent
-    {
-        const auto& incomings = genome.incomingConnectionList;
-        for (const auto& elem : incomings)
-        {
-            for (auto innovId : elem.second)
-            {
-                auto con = GetConnectionGene(genome, innovId);
-                if (!con || con->outNode != elem.first)
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    // Check if node-connection map is consistent
-    {
-        const auto& outgoings = genome.outgoingConnectionList;
-        for (const auto& elem : outgoings)
-        {
-            for (auto innovId : elem.second)
-            {
-                auto con = GetConnectionGene(genome, innovId);
-                if (!con || con->inNode != elem.first)
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    // Bias node shouldn't have incoming connections
-    {
-        const auto& nodes = genome.nodeGenes;
-        const size_t numOfNode = nodes.size();
-        for (size_t i = 0; i < numOfNode; ++i)
-        {
-            if (nodes[i].type == NodeGeneType::Bias)
-            {
-                if (genome.incomingConnectionList.find(nodes[i].id) != genome.incomingConnectionList.end())
+                const auto& c1 = itr1->second;
+                const auto& c2 = itr2->second;
+                if (c1.inNode == c2.inNode && c1.outNode == c2.outNode)
                 {
                     return false;
                 }
@@ -1269,16 +1108,16 @@ bool NEAT::CheckSanity(const Genome& genome) const
 
     if (!config.allowCyclicNetwork)
     {
-        for (const auto& con : genome.connectionGenes)
+        for (const auto con : genome.connectionGenes)
         {
-            if (!CheckCyclic(genome, con.inNode, con.outNode))
+            if (con.second.enabled && !CheckCyclic(genome, con.second.inNode, con.second.outNode))
             {
                 return false;
             }
         }
     }
 
+#endif
     return true;
 }
 
-#endif

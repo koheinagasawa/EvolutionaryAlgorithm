@@ -42,7 +42,7 @@ protected:
     }
 
     virtual
-    auto CreateDefaultInitialGenome() const->Genome
+    auto CreateDefaultInitialGenome() const -> Genome
     {
         Genome genome;
 
@@ -53,29 +53,38 @@ protected:
         auto& nodeGenes = genome.nodeGenes;
 
         // Input nodes
-        nodeGenes.push_back(NodeGene{ 0, NodeGeneType::Input, defaultActivationFuncId });
-        nodeGenes.push_back(NodeGene{ 1, NodeGeneType::Input, defaultActivationFuncId });
+        NodeGene input1{ 0, NodeGeneType::Input };
+        input1.activationFuncId = defaultActivationFuncId;
+        input1.enabled = true;
+        NodeGene input2{ 1, NodeGeneType::Input };
+        input2.activationFuncId = defaultActivationFuncId;
+        input2.enabled = true;
 
         // Bias nodes
-        nodeGenes.push_back(NodeGene{ 2, NodeGeneType::Bias, defaultActivationFuncId });
+        NodeGene bias{ 2, NodeGeneType::Bias };
+        bias.activationFuncId = defaultActivationFuncId;
+        bias.enabled = true;
 
         // Output node
-        nodeGenes.push_back(NodeGene{ 3, NodeGeneType::Output, defaultActivationFuncId });
-
-        genome.connectionGenes.reserve(3);
-        auto& connections = genome.connectionGenes;
+        NodeGene output{ 3, NodeGeneType::Output };
+        output.activationFuncId = defaultActivationFuncId;
+        output.enabled = true;
 
         auto distr = std::uniform_real_distribution<float>(-1.f, 1.f);
-        auto addConnectionGene = [&genome, &connections, &distr, this](InnovationId innovId, NodeGeneId nodeId1, NodeGeneId nodeId2)
-        {
-            connections.push_back(ConnectionGene{ innovId, nodeId1, nodeId2, distr(randomGenerator), true });
-            genome.outgoingConnectionList[nodeId1].push_back(innovId);
-            genome.incomingConnectionList[nodeId2].push_back(innovId);
-        };
+        ConnectionGene gene1{ 0, input1.id, output.id, distr(randomGenerator), true };
+        ConnectionGene gene2{ 1, input2.id, output.id, distr(randomGenerator), true };
+        ConnectionGene gene3{ 2, bias.id,   output.id, distr(randomGenerator), true };
+        genome.connectionGenes[0] = gene1;
+        genome.connectionGenes[1] = gene2;
+        genome.connectionGenes[2] = gene3;
+        output.links.push_back(0);
+        output.links.push_back(1);
+        output.links.push_back(2);
 
-        addConnectionGene(0, m_inputNode1, m_outputNode);
-        addConnectionGene(1, m_inputNode2, m_outputNode);
-        addConnectionGene(2, m_biasNode, m_outputNode);
+        genome.nodeGenes[0] = input1;
+        genome.nodeGenes[1] = input2;
+        genome.nodeGenes[2] = bias;
+        genome.nodeGenes[3] = output;
 
         return genome;
     }
