@@ -104,11 +104,8 @@ int main()
 
     for (int i = 0; i < 10000; ++i)
     {
-        neat.GetNewGeneration();
-        if (i % 10 == 0)
-        {
-            neat.PrintFitness();
-        }
+        //neat.GetNewGeneration(true);
+        neat.GetNewGeneration(i % 10 == 0);
     }
 
     //neat.AddNewNode(neat.generation.genomes[0]);

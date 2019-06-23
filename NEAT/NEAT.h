@@ -99,8 +99,10 @@ public:
     {
         SpeciesId id;
         Genome representative;
-        std::vector<int> genomes;
+        std::vector<Score> scores;
         Score bestScore;
+        float totalScore = 0.f;
+        float adjustedTotalScore = 0.f;
         float previousBestFitness = 0.f;
         int stagnantGenerationCount = 0;
         bool operator< (const Species& rhs) { return bestScore.fitness < rhs.bestScore.fitness; }
@@ -166,7 +168,7 @@ public:
     void Reset();
 
     // Generate a new generation and return it
-    auto GetNewGeneration() -> const Generation &;
+    auto GetNewGeneration(bool printFitness) -> const Generation &;
 
     // Return the current generation
     auto GetCurrentGeneration() -> const Generation &;
@@ -249,17 +251,23 @@ private:
     auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const -> Genome;
 
     // Implementation of generating a new generation
-    void GenerateNewGeneration();
+    void GenerateNewGeneration(bool printFitness);
+
+    void EvaluateGeneration();
+
+    void SelectGenomes();
 
     void Mutate(Generation& generation);
 
     // Make sure that the same topological changes have the same id
     void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes);
 
-    void Speciation(Generation& g, std::vector<Score>& scores, std::vector<int>& genomesToCopy);
+    void Speciation(Generation& g, std::vector<Score>& scores);
 
     // Calculate distance between two genomes based on their topologies and weights
     float CalculateDistance(const Genome& genome1, const Genome& genome2) const;
+
+    void UpdateSpecies();
 
 protected:
 

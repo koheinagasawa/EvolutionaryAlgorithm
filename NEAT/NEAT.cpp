@@ -78,11 +78,11 @@ void NEAT::Reset()
 }
 
 // Gain the new generation
-auto NEAT::GetNewGeneration() -> const Generation&
+auto NEAT::GetNewGeneration(bool printFitness) -> const Generation&
 {
     if (isInitialized)
     {
-        GenerateNewGeneration();
+        GenerateNewGeneration(printFitness);
     }
     return generation;
 }
@@ -101,8 +101,8 @@ void NEAT::PrintFitness() const
     const int size = generation.genomes->size();
     float maxFitness = 0;
     int bestGenomeId = -1;
-    int speciesOfTheBestGenome = -1;
     float sumScoreOfBestSpecies = 0.f;
+    int speciesOfTheBestGenome = 0;
     for (int i = 0; i < size; ++i)
     {
         const Genome& genome = (*generation.genomes).at(i);
@@ -121,12 +121,30 @@ void NEAT::PrintFitness() const
             sumScoreOfBestSpecies += fitness;
         }
     }
+
+    const Species* bestSpecies = nullptr;
+    for (const auto& sp : generation.species)
+    {
+        if (sp.id == speciesOfTheBestGenome)
+        {
+            bestSpecies = &sp;
+            break;
+        }
+    }
+
+
     std::cout << "Average fitness over " << size << " organims: " << sum / (float)size << std::endl;
-    std::cout << "Maximum fitness: Species " << speciesOfTheBestGenome << ": Genome " << bestGenomeId << " - " << maxFitness << std::endl;
+    std::cout << "Maximum fitness: Species " << speciesOfTheBestGenome << ": Genome " << bestGenomeId << " - Score: " << maxFitness << std::endl;
     std::cout << "Number of species: " << generation.species.size() << std::endl;
-    assert(speciesOfTheBestGenome == generation.species[0].id);
-    std::cout << "Number of genomes in the best species: " << generation.species[0].genomes.size() << std::endl;
-    std::cout << "Averaged score of the best species: " << sumScoreOfBestSpecies / (float)generation.species[0].genomes.size() << std::endl;
+    if (bestSpecies)
+    {
+        std::cout << "Number of genomes in the best species: " << bestSpecies->scores.size() << std::endl;
+        std::cout << "Averaged score of the best species: " << sumScoreOfBestSpecies / (float)bestSpecies->scores.size() << std::endl;
+    }
+    else
+    {
+        std::cout << "Species of the best genome just extincted!" << std::endl;
+    }
 }
 
 auto NEAT::GetNewInnovationId() -> InnovationId
@@ -628,32 +646,54 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
 }
 
 // Implementation of generating a new generation
-void NEAT::GenerateNewGeneration()
+void NEAT::GenerateNewGeneration(bool printFitness)
 {
     Mutate(generation);
 
-    GenomeList currentGen = generation.genomes;
-    GenomeList nextGen = genomeListBuffer;
+    EvaluateGeneration();
 
-    for (uint32_t i = 0; i < config.numOrganismsInGeneration; ++i)
+    if (printFitness)
     {
-        scores[i] = Score{ Evaluate((*currentGen)[i]), i };
+        PrintFitness();
     }
 
-    std::vector<int> genomesToCopy;
-    size_t numOrgsToCopy = size_t(config.numOrganismsInGeneration * (1.f - config.crossOverRate));
+    SelectGenomes();
+}
+
+void NEAT::EvaluateGeneration()
+{
+    for (uint32_t i = 0; i < config.numOrganismsInGeneration; ++i)
+    {
+        scores[i] = Score{ Evaluate((*generation.genomes)[i]), i };
+    }
 
     if (config.diversityProtection == DiversityProtectionMethod::Speciation)
     {
-        Speciation(generation, scores, genomesToCopy);
+        Speciation(generation, scores);
     }
     else if (config.diversityProtection == DiversityProtectionMethod::MorphologicalInnovationProtection)
     {
         // Not implemented yet
         assert(0);
     }
+}
 
-    size_t nextGenomeIndex = 0;
+void NEAT::SelectGenomes()
+{
+    GenomeList currentGen = generation.genomes;
+    GenomeList nextGen = genomeListBuffer;
+
+    std::vector<int> genomesToCopy;
+    genomesToCopy.reserve(generation.species.size());
+    for (const auto& sp : generation.species)
+    {
+        if (sp.scores.size() >= 5)
+        {
+            genomesToCopy.push_back(sp.bestScore.index);
+        }
+    }
+
+    uint32_t nextGenomeIndex = 0;
     for (; nextGenomeIndex < genomesToCopy.size(); ++nextGenomeIndex)
     {
         (*nextGen)[nextGenomeIndex] = (*currentGen)[genomesToCopy[nextGenomeIndex]];
@@ -665,47 +705,96 @@ void NEAT::GenerateNewGeneration()
             return s1.fitness > s2.fitness;
         });
 
+    float scoreSum = 0;
+    for (const auto& score : scores)
     {
-        float scoreSum = 0;
+        scoreSum += score.fitness;
+    }
+
+    RandomRealDistribution<float> genomeSelector(0, scoreSum);
+    auto getGenome = [scoreSum](float f, const std::vector<Score>& scores)
+    {
+        float currentSum = 0;
         for (const auto& score : scores)
         {
-            scoreSum += score.fitness;
-        }
-        auto getGenome = [this, scoreSum, currentGen](float f)
-        {
-            float currentSum = 0;
-            for (const auto& score : scores)
+            currentSum += score.fitness;
+            if (currentSum > f)
             {
-                currentSum += score.fitness;
-                if (currentSum > f)
-                {
-                    return (*currentGen)[score.index];
-                }
+                return score.index;
             }
+        }
 
-            return (*currentGen)[scores.back().index];
-        };
+        return scores.back().index;
+    };
 
-        // Just copy high score genomes to the next generation
-        RandomRealDistribution<float> random(0, scoreSum);
-        for (; nextGenomeIndex < numOrgsToCopy; ++nextGenomeIndex)
+    bool canCrossOver = false;
+    if (config.enableCrossOver)
+    {
+        for (const auto& sp : generation.species)
         {
-            (*nextGen)[nextGenomeIndex] = getGenome(random(randomGenerator));
+            if (sp.scores.size() > 1)
+            {
+                canCrossOver = true;
+                break;
+            }
         }
     }
 
-    RandomIntDistribution<int> randomi(0, config.numOrganismsInGeneration - 1);
-    if (config.enableCrossOver)
+    if (canCrossOver)
     {
-        // Rest population will be generated by cross over
-        for (; nextGenomeIndex < config.numOrganismsInGeneration; ++nextGenomeIndex)
+        uint32_t numOrgsToCopy = uint32_t(config.numOrganismsInGeneration * (1.f - config.crossOverRate));
+
+        // Just copy high score genomes to the next generation
+        for (; nextGenomeIndex < numOrgsToCopy; ++nextGenomeIndex)
         {
+            (*nextGen)[nextGenomeIndex] = (*currentGen)[getGenome(genomeSelector(randomGenerator), scores)];
+        }
+
+        float speciesScoreSum = 0;
+        for (const auto& sp : generation.species)
+        {
+            speciesScoreSum += sp.adjustedTotalScore;
+        }
+
+        // Rest population will be generated by cross over
+        for (; nextGenomeIndex < config.numOrganismsInGeneration;)
+        {
+            RandomRealDistribution<float> speciesSelector(0, speciesScoreSum);
+            auto getSpecies = [this](float f)
+            {
+                float currentSum = 0;
+                for (int i = 0; i < (int)generation.species.size(); ++i)
+                {
+                    const auto& species = generation.species[i];
+                    currentSum += species.adjustedTotalScore;
+                    if (currentSum > f)
+                    {
+                        return i;
+                    }
+                }
+
+                return (int)generation.species.size() - 1;
+            };
+
+            const auto& sp = generation.species[getSpecies(speciesSelector(randomGenerator))];
+
+            if (sp.scores.size() == 1)
+            {
+                (*nextGen)[nextGenomeIndex++] = (*currentGen)[sp.scores[0].index];
+                continue;
+            }
+
+            RandomRealDistribution<float> genomeInSpeciesSelector(0, sp.totalScore);
+
             // Select random two genomes
-            int i1 = randomi(randomGenerator);
-            int i2 = randomi(randomGenerator);
+            int i1 = getGenome(genomeInSpeciesSelector(randomGenerator), sp.scores);
+            int i2 = getGenome(genomeInSpeciesSelector(randomGenerator), sp.scores);
+
+            assert((*currentGen)[i1].species == (*currentGen)[i2].species);
+
             while (i1 == i2)
             {
-                i2 = randomi(randomGenerator);
+                i2 = getGenome(genomeInSpeciesSelector(randomGenerator), sp.scores);
             }
 
             // Ensure the genome at i1 has a higher fitness
@@ -715,7 +804,7 @@ void NEAT::GenerateNewGeneration()
             }
 
             // Cross over
-            (*nextGen)[nextGenomeIndex] = CrossOver(
+            (*nextGen)[nextGenomeIndex++] = CrossOver(
                 (*currentGen)[scores[i1].index], scores[i1].fitness,
                 (*currentGen)[scores[i2].index], scores[i2].fitness);
         }
@@ -725,7 +814,7 @@ void NEAT::GenerateNewGeneration()
         // Just randomly select the rest population
         for (; nextGenomeIndex < config.numOrganismsInGeneration; ++nextGenomeIndex)
         {
-            (*nextGen)[nextGenomeIndex] = (*currentGen)[randomi(randomGenerator)];
+            (*nextGen)[nextGenomeIndex] = (*currentGen)[getGenome(genomeSelector(randomGenerator), scores)];
         }
     }
 
@@ -867,15 +956,16 @@ void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes)
     }
 }
 
-void NEAT::Speciation(Generation& g, std::vector<Score>& scores, std::vector<int>& genomesToCopy)
+void NEAT::Speciation(Generation& g, std::vector<Score>& scores)
 {
     for (auto& species : g.species)
     {
-        species.genomes.clear();
+        species.scores.clear();
         if (species.stagnantGenerationCount == 0)
         {
             species.previousBestFitness = species.bestScore.fitness;
         }
+        species.totalScore = 0.f;
         species.bestScore.fitness = 0.f;
     }
 
@@ -891,7 +981,8 @@ void NEAT::Speciation(Generation& g, std::vector<Score>& scores, std::vector<int
                 if (CalculateDistance(genome, representative) < config.speciationDistThreshold)
                 {
                     genome.species = sp.id;
-                    sp.genomes.push_back(i);
+                    sp.scores.push_back(scores[i]);
+                    sp.totalScore += scores[i].fitness;
 
                     if (sp.bestScore.fitness < scores[i].fitness)
                     {
@@ -906,7 +997,8 @@ void NEAT::Speciation(Generation& g, std::vector<Score>& scores, std::vector<int
         {
             genome.species = currentSpeciesId;
             g.species.push_back(Species{ currentSpeciesId++ });
-            g.species.back().genomes.push_back(i);
+            g.species.back().scores.push_back(scores[i]);
+            g.species.back().totalScore += scores[i].fitness;
             g.species.back().bestScore = scores[i];
             g.species.back().representative = genome;
         }
@@ -915,21 +1007,21 @@ void NEAT::Speciation(Generation& g, std::vector<Score>& scores, std::vector<int
     for (auto itr = g.species.begin(); itr != g.species.end();)
     {
         auto& species = *itr;
-        if (species.genomes.size() == 0)
+        if (species.scores.size() == 0)
         {
             itr = g.species.erase(itr);
             continue;
         }
 
-        RandomIntDistribution<uint32_t> randomInt(0, species.genomes.size() - 1);
-        int representativeIndex = species.genomes[randomInt(randomGenerator)];
+        RandomIntDistribution<uint32_t> randomInt(0, species.scores.size() - 1);
+        int representativeIndex = species.scores[randomInt(randomGenerator)].index;
         species.representative = (*g.genomes)[representativeIndex];
 
         bool extinct = false;
         if (species.previousBestFitness >= species.bestScore.fitness)
         {
             ++species.stagnantGenerationCount;
-            if (species.stagnantGenerationCount >= 15)
+            if (species.stagnantGenerationCount >= 15 && g.species.size() > 2)
             {
                 extinct = true;
             }
@@ -937,23 +1029,33 @@ void NEAT::Speciation(Generation& g, std::vector<Score>& scores, std::vector<int
 
         if (!extinct)
         {
-            for (int genomeIndex : species.genomes)
+            float denom = 1.0f / (float)species.scores.size();
+            for (auto& score : species.scores)
             {
-                scores[genomeIndex].fitness /= (float)species.genomes.size();
+                score.fitness *= denom;
+                scores[score.index].fitness = score.fitness;
             }
+            species.totalScore *= denom;
+            species.adjustedTotalScore = species.totalScore * denom;
 
-            if (species.genomes.size() >= 5)
+            if (species.scores.size() >= 5)
             {
-                genomesToCopy.push_back(species.bestScore.index);
                 (*g.genomes)[species.bestScore.index].protect = true;
             }
+
+            std::sort(species.scores.begin(), species.scores.end(), [](const Score& s1, const Score& s2)
+                {
+                    return s1.fitness > s2.fitness;
+                });
         }
         else
         {
-            for (int genomeIndex : species.genomes)
+            for (const auto& s : species.scores)
             {
-                scores[genomeIndex].fitness = 0.0f;
+                scores[s.index].fitness = 0.f;
             }
+            itr = g.species.erase(itr);
+            continue;
         }
 
         ++itr;
