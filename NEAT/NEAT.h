@@ -4,6 +4,7 @@
 #include <functional>
 #include <unordered_map>
 #include <map>
+#include <memory>
 
 // Custom hasher for std::pair
 struct PairHash
@@ -38,15 +39,14 @@ public:
     using ActivationFunc = std::function<float(float)>;
     using FitnessFunc = std::function<float(const Genome&)>;
 
-    using NodeGeneList = std::unordered_map<NodeGeneId, NodeGene>;
     using ConnectionGeneList = std::map<InnovationId, ConnectionGene>;
-    using GenomeList = std::vector<Genome>;
-    using SpeciesList = std::vector<Species>;
+    using GenomeList = std::shared_ptr<std::vector<Genome>>;
 
     // Definitions of invalid id
     static const NodeGeneId invalidNodeGeneId = (NodeGeneId)-1;
     static const InnovationId invalidInnovationId = (InnovationId)-1;
     static const GenerationId invalidGenerationId = (GenerationId)-1;
+    static const SpeciesId invalidSpeciesId = (SpeciesId)-1;
 
     enum class NodeGeneType
     {
@@ -58,11 +58,8 @@ public:
 
     struct NodeGene
     {
-        NodeGeneId id;
         NodeGeneType type;
         ActivationFuncId activationFuncId;
-        std::vector<InnovationId> links;
-        bool enabled = false;
     };
 
     struct ConnectionGene
@@ -76,26 +73,45 @@ public:
 
     struct Genome
     {
-        // List of node genes
-        NodeGeneList nodeGenes;
+        struct Links
+        {
+            std::vector<InnovationId> incomings;
+            std::vector<InnovationId> outgoings;
+        };
+
+        std::unordered_map<NodeGeneId, Links> nodeLinks;
 
         // List connection genes sorted by their innovation ids
         ConnectionGeneList connectionGenes;
 
         SpeciesId species;
+
+        bool protect = false;
+    };
+
+    struct Score
+    {
+        float fitness;
+        uint32_t index;
     };
 
     struct Species
     {
         SpeciesId id;
         Genome representative;
+        std::vector<int> genomes;
+        Score bestScore;
+        float previousBestFitness = 0.f;
+        int stagnantGenerationCount = 0;
+        bool operator< (const Species& rhs) { return bestScore.fitness < rhs.bestScore.fitness; }
     };
 
     struct Generation
     {
         GenerationId generationId = 0;
         GenomeList genomes;
-        SpeciesList species;
+        std::vector<NodeGene> nodeGenes;
+        std::vector<Species> species;
     };
 
     enum class DiversityProtectionMethod
@@ -161,7 +177,12 @@ public:
 private:
 
     InnovationId currentInnovationId = 0;
-    NodeGeneId currentNodeGeneId = 0;
+    SpeciesId currentSpeciesId = 0;
+
+    GenomeList genomeListBuffer = nullptr;
+
+    // Evaluate all the current gen genomes
+    std::vector<Score> scores;
 
 protected:
 
@@ -196,15 +217,11 @@ protected:
 
     bool isInitialized = false;
 
-    inline auto GetCurrentNodeGeneId() const -> NodeGeneId { return currentNodeGeneId; }
-
     inline auto GetCurrentInnovationId() const -> InnovationId { return currentInnovationId; }
-
-    auto GetNewNodeGeneId() -> NodeGeneId;
 
     auto GetNewInnovationId() -> InnovationId;
 
-    auto AddNewNode(Genome& genome, NodeGeneType type) -> NodeGene;
+    auto CreateNewNode(NodeGeneType type) -> NodeGeneId;
 
     auto Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float weight) -> InnovationId;
 
@@ -225,8 +242,6 @@ private:
 
     auto GetNodeCandidatesAsOutNodeOfNewConnection(const Genome& genome) const -> std::vector<NodeGeneId>;
 
-    void DisableConnection(Genome& genome, ConnectionGene& connection) const;
-
     bool CheckCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
 
     // Perform cross over operation over two genomes and generate a new genome
@@ -241,6 +256,8 @@ private:
     // Make sure that the same topological changes have the same id
     void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes);
 
+    void Speciation(Generation& g, std::vector<Score>& scores, std::vector<int>& genomesToCopy);
+
     // Calculate distance between two genomes based on their topologies and weights
     float CalculateDistance(const Genome& genome1, const Genome& genome2) const;
 
@@ -251,6 +268,8 @@ protected:
 
     // Evaluate value of each node recursively
     void EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const;
+
+    virtual void SetupInitialNodeGenes();
 
     // Create default genome for the initial generation
     virtual auto CreateDefaultInitialGenome() const -> Genome;
@@ -270,10 +289,6 @@ protected:
     auto GetConnectionGene(Genome& genome, InnovationId innovId) const -> ConnectionGene*;
 
     auto GetConnectionGene(const Genome& genome, InnovationId innovId) const -> const ConnectionGene*;
-
-    auto GetNodeGene(Genome& genome, NodeGeneId id) const -> NodeGene*;
-
-    auto GetNodeGene(const Genome& genome, NodeGeneId id) const -> const NodeGene*;
 
     bool CheckSanity(const Genome& genome) const;
 };

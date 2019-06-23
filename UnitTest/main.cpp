@@ -13,11 +13,7 @@ protected:
     virtual
     float Evaluate(const Genome& genome) const
     {
-        auto outputNode = GetNodeGene(genome, m_outputNode);
-        assert(outputNode != nullptr);
-        auto outputNodeId = outputNode->id;
-
-        auto eval = [&genome, outputNodeId, this](bool input1, bool input2) -> float
+        auto eval = [&genome, this](bool input1, bool input2) -> float
         {
             // Initialize values
             std::unordered_map<NodeGeneId, float> values;
@@ -26,8 +22,8 @@ protected:
             values[m_inputNode2] = input2 ? 1.f : -1.f;
 
             std::vector<NodeGeneId> evaluatingNodes;
-            EvaluateRecursive(genome, outputNodeId, evaluatingNodes, values);
-            return values[outputNodeId];
+            EvaluateRecursive(genome, m_outputNode, evaluatingNodes, values);
+            return values[m_outputNode];
         };
 
         float score = 0.f;
@@ -41,50 +37,47 @@ protected:
         return score * score;
     }
 
+    virtual void SetupInitialNodeGenes() override
+    {
+        // There are three input nodes (two for XOR inputs and one for bias)
+        // no hidden node and one output node
+        auto& nodeGenes = generation.nodeGenes;
+        nodeGenes.resize(4);
+
+        // Input nodes
+        nodeGenes[0] = NodeGene{ NodeGeneType::Input, defaultActivationFuncId };
+        nodeGenes[1] = NodeGene{ NodeGeneType::Input, defaultActivationFuncId };
+
+        // Bias nodes
+        nodeGenes[2] = NodeGene{ NodeGeneType::Bias, defaultActivationFuncId };
+
+        // Output node
+        nodeGenes[3] = NodeGene{ NodeGeneType::Output, defaultActivationFuncId };
+    }
+
     virtual
     auto CreateDefaultInitialGenome() const -> Genome
     {
         Genome genome;
 
-        // There are three input nodes (two for XOR inputs and one for bias)
-        // no hidden node and one output node
-        genome.nodeGenes.reserve(4);
-
-        auto& nodeGenes = genome.nodeGenes;
-
-        // Input nodes
-        NodeGene input1{ 0, NodeGeneType::Input };
-        input1.activationFuncId = defaultActivationFuncId;
-        input1.enabled = true;
-        NodeGene input2{ 1, NodeGeneType::Input };
-        input2.activationFuncId = defaultActivationFuncId;
-        input2.enabled = true;
-
-        // Bias nodes
-        NodeGene bias{ 2, NodeGeneType::Bias };
-        bias.activationFuncId = defaultActivationFuncId;
-        bias.enabled = true;
-
-        // Output node
-        NodeGene output{ 3, NodeGeneType::Output };
-        output.activationFuncId = defaultActivationFuncId;
-        output.enabled = true;
+        NodeGeneId input1 = 0;
+        NodeGeneId input2 = 1;
+        NodeGeneId bias = 2;
+        NodeGeneId output = 3;
 
         auto distr = std::uniform_real_distribution<float>(-1.f, 1.f);
-        ConnectionGene gene1{ 0, input1.id, output.id, distr(randomGenerator), true };
-        ConnectionGene gene2{ 1, input2.id, output.id, distr(randomGenerator), true };
-        ConnectionGene gene3{ 2, bias.id,   output.id, distr(randomGenerator), true };
+        ConnectionGene gene1{ 0, input1, output, distr(randomGenerator), true };
+        ConnectionGene gene2{ 1, input2, output, distr(randomGenerator), true };
+        ConnectionGene gene3{ 2, bias,   output, distr(randomGenerator), true };
+        genome.nodeLinks[input1].outgoings.push_back(0);
+        genome.nodeLinks[input2].outgoings.push_back(1);
+        genome.nodeLinks[bias].outgoings.push_back(2);
+        genome.nodeLinks[output].incomings.push_back(0);
+        genome.nodeLinks[output].incomings.push_back(1);
+        genome.nodeLinks[output].incomings.push_back(2);
         genome.connectionGenes[0] = gene1;
         genome.connectionGenes[1] = gene2;
         genome.connectionGenes[2] = gene3;
-        output.links.push_back(0);
-        output.links.push_back(1);
-        output.links.push_back(2);
-
-        genome.nodeGenes[0] = input1;
-        genome.nodeGenes[1] = input2;
-        genome.nodeGenes[2] = bias;
-        genome.nodeGenes[3] = output;
 
         return genome;
     }
@@ -104,7 +97,7 @@ int main()
     config.allowCyclicNetwork = false;
     config.activateFunctions.push_back([](float f)
         {return 1 / (1 + exp(-4.9f * f)); });
-    config.diversityProtection = NEAT::DiversityProtectionMethod::None;
+    config.diversityProtection = NEAT::DiversityProtectionMethod::Speciation;
     config.numOrganismsInGeneration = 150;
     XORNEAT neat;
     neat.Initialize(config);
