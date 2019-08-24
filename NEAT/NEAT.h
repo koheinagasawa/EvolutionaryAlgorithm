@@ -1,9 +1,11 @@
 #pragma once
 
 #include <vector>
+#include <random>
 #include <functional>
 #include <unordered_map>
 #include <map>
+#include <set>
 #include <memory>
 
 // Custom hasher for std::pair
@@ -33,7 +35,7 @@ public:
     using GenerationId = uint32_t;
     using NodeGeneId = uint32_t;
     using InnovationId = uint32_t;
-    using ActivationFuncId = uint16_t;
+    using ActivationFuncId = uint8_t;
     using SpeciesId = uint16_t;
 
     using ActivationFunc = std::function<float(float)>;
@@ -43,77 +45,92 @@ public:
     using GenomeList = std::shared_ptr<std::vector<Genome>>;
 
     // Definitions of invalid id
-    static const NodeGeneId invalidNodeGeneId = (NodeGeneId)-1;
-    static const InnovationId invalidInnovationId = (InnovationId)-1;
-    static const GenerationId invalidGenerationId = (GenerationId)-1;
-    static const SpeciesId invalidSpeciesId = (SpeciesId)-1;
+    static const NodeGeneId s_invalidNodeGeneId = (NodeGeneId)-1;
+    static const InnovationId s_invalidInnovationId = (InnovationId)-1;
+    static const GenerationId s_invalidGenerationId = (GenerationId)-1;
+    static const SpeciesId s_invalidSpeciesId = (SpeciesId)-1;
 
     enum class NodeGeneType
     {
         Input,
         Output,
         Hidden,
-        Bias,
+        Bias
     };
 
     struct NodeGene
     {
-        NodeGeneType type;
-        ActivationFuncId activationFuncId;
+        NodeGeneType m_type;
+        ActivationFuncId m_activationFuncId;
     };
 
     struct ConnectionGene
     {
-        InnovationId innovId;
-        NodeGeneId inNode;
-        NodeGeneId outNode;
-        float weight;
-        bool enabled;
+        InnovationId m_innovId;
+        NodeGeneId m_inNode;
+        NodeGeneId m_outNode;
+        float m_weight;
+        bool m_enabled;
     };
 
     struct Genome
     {
         struct Links
         {
-            std::vector<InnovationId> incomings;
-            std::vector<InnovationId> outgoings;
+            int m_numEnabledIncomings = 0;
+            int m_numEnabledOutgoings = 0;
+            std::vector<InnovationId> m_incomings;
+            std::vector<InnovationId> m_outgoings;
         };
 
-        std::unordered_map<NodeGeneId, Links> nodeLinks;
+        inline bool HasNode(NodeGeneId nodeId) const;
+        inline bool HasConnection(InnovationId innovId) const;
+        inline void AddConnection(const ConnectionGene& c);
+        inline void DisableConnection(InnovationId innovId);
+        inline void AddNode(NodeGeneId);
+        inline int GetNumConnections() const;
+        inline int GetNumNodes() const;
+        inline auto GetIncommingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId>&;
+        inline auto GetOutgoingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId>&;
 
-        // List connection genes sorted by their innovation ids
-        ConnectionGeneList connectionGenes;
+        std::unordered_map<NodeGeneId, Links> m_nodeLinks;
 
-        SpeciesId species;
+        // List of connection genes sorted by their innovation ids
+        ConnectionGeneList m_connectionGenes;
 
-        bool protect = false;
+        SpeciesId m_species;
+
+        bool m_protect = false;
     };
 
     struct Score
     {
-        float fitness;
-        uint32_t index;
+        float m_fitness;
+        float m_adjustedFitness;
+        uint32_t m_index;
     };
 
     struct Species
     {
-        SpeciesId id;
-        Genome representative;
-        std::vector<Score> scores;
-        Score bestScore;
-        float totalScore = 0.f;
-        float adjustedTotalScore = 0.f;
-        float previousBestFitness = 0.f;
-        int stagnantGenerationCount = 0;
-        bool operator< (const Species& rhs) { return bestScore.fitness < rhs.bestScore.fitness; }
+        SpeciesId m_id;
+        Genome m_representative;
+        std::vector<Score> m_scores;
+        Score m_bestScore;
+        float m_adjustedTotalScore = 0.f;
+        float m_previousBestFitness = 0.f;
+        int m_stagnantGenerationCount = 0;
+        
+        inline bool ShouldProtectBest() const;
+
+        inline bool operator< (const Species& rhs) const;
     };
 
     struct Generation
     {
-        GenerationId generationId = 0;
-        GenomeList genomes;
-        std::vector<NodeGene> nodeGenes;
-        std::vector<Species> species;
+        GenerationId m_generationId = 0;
+        GenomeList m_genomes = nullptr;
+        std::vector<NodeGene> m_nodeGenes;
+        std::vector<Species> m_species;
     };
 
     enum class DiversityProtectionMethod
@@ -126,37 +143,73 @@ public:
     // Settings of various parameters used in NEAT
     struct Configration
     {
-        FitnessFunc fitnessFunction;
-        ActivationFuncId defaultActivateFunctionId = 0;
-        std::vector<ActivationFunc> activateFunctions;
+        FitnessFunc m_fitnessFunction;
+        ActivationFuncId m_defaultActivateFunctionId = 0;
+        std::vector<ActivationFunc> m_activateFunctions;
 
-        uint32_t numOrganismsInGeneration = 100;
+        uint32_t m_numOrganismsInGeneration = 100;
 
-        float weightMutationRate = .8f;
-        float weightPerturbationRate = .9f;
-        float geneDisablingRate = .75f;
-        float crossOverRate = .75f;
-        float interSpeciesMatingRate = .001f;
-        float nodeAdditionRate = .03f;
-        float connectionAdditionRate = .05f;
-        float speciationDistThreshold = 3.f;
+        float m_maximumWeight = 1.0f;
+        float m_minimumWeight = -11.0f;
 
-        bool enableCrossOver = true;
+        float m_weightMutationRate = .8f;
+        float m_weightPerturbationRate = .9f;
+        float m_weightNewValueRate = .1f;
+        float m_geneDisablingRate = .75f;
+        float m_crossOverRate = .75f;
+        float m_interSpeciesMatingRate = .001f;
+        float m_nodeAdditionRate = .03f;
+        float m_connectionAdditionRate = .05f;
+        float m_speciationDistThreshold = 3.0f;
 
-        bool useGlobalActivationFunc = true;
+        bool m_enableCrossOver = true;
+
+        bool m_useGlobalActivationFunc = true;
+        bool m_extinctStagnantSpecies = true;
 
         // Indicates if NEAT allows to generate networks with cyclic connections
         // If false, generated networks are guaranteed to be feed forward
-        bool allowCyclicNetwork = true;
+        bool m_allowCyclicNetwork = true;
 
-        DiversityProtectionMethod diversityProtection = DiversityProtectionMethod::Speciation;
+        DiversityProtectionMethod m_diversityProtection = DiversityProtectionMethod::Speciation;
 
-        bool enableSanityCheck = true;
+        bool m_enableSanityCheck = true;
     };
 
-public:
+protected:
 
-    Configration config;
+    using NodePair = std::pair<NodeGeneId, NodeGeneId>;
+
+    struct NodeAddedInfo
+    {
+        Genome& m_genome;
+        NodeGeneId m_newNode;
+        InnovationId m_oldConnection;
+        InnovationId m_newConnection1;
+        InnovationId m_newConnection2;
+    };
+
+    struct NewlyAddedConnection
+    {
+        Genome& m_genome;
+        InnovationId m_innovId;
+        NodePair m_nodes;
+    };
+
+    struct IncompatibleRegion
+    {
+        std::set<NodeGeneId> m_nodes;
+        std::set<InnovationId> m_connections;
+    };
+
+    using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NodeAddedInfo>>;
+
+    template <typename T>
+    using RandomIntDistribution = std::uniform_int_distribution<T>;
+    template <typename T>
+    using RandomRealDistribution = std::uniform_real_distribution<T>;
+
+public:
 
     // Initialize NEAT
     // This has to be called before gaining any generations
@@ -176,100 +229,21 @@ public:
     // Print fitness of each genome in the current generation
     void PrintFitness() const;
 
-private:
-
-    InnovationId currentInnovationId = 0;
-    SpeciesId currentSpeciesId = 0;
-
-    GenomeList genomeListBuffer = nullptr;
-
-    // Evaluate all the current gen genomes
-    std::vector<Score> scores;
+    // Serialize generation as a json file
+    void SerializeGeneration(const char* fileName) const;
 
 protected:
 
-    Generation generation;
+    inline auto GetCurrentInnovationId() const -> InnovationId;
 
-    FitnessFunc fitnessFunc;
+    // Increment innovation id and return the new id
+    auto GetNewInnovationId()->InnovationId;
 
-    ActivationFuncId defaultActivationFuncId = 0;
-    std::vector<ActivationFunc> activationFuncs;
+    // Create a new node of a type
+    auto CreateNewNode(NodeGeneType type)->NodeGeneId;
 
-    using NodePair = std::pair<NodeGeneId, NodeGeneId>;
-
-    std::unordered_map<NodePair, ConnectionGene, PairHash> innovationHistory;
-
-    struct NodeAddedInfo
-    {
-        Genome& genome;
-        NodeGeneId newNode;
-        InnovationId oldConnection;
-        InnovationId newConnection1;
-        InnovationId newConnection2;
-    };
-
-    struct NewlyAddedConnection
-    {
-        Genome& genome;
-        InnovationId innovId;
-        NodePair nodes;
-    };
-
-    using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NodeAddedInfo>>;
-
-    bool isInitialized = false;
-
-    inline auto GetCurrentInnovationId() const -> InnovationId { return currentInnovationId; }
-
-    auto GetNewInnovationId() -> InnovationId;
-
-    auto CreateNewNode(NodeGeneType type) -> NodeGeneId;
-
-    auto Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float weight) -> InnovationId;
-
-private:
-
-    // Add a new node at a random connection in the genome
-    auto AddNewNode(Genome& genome) ->NodeAddedInfo;
-
-    // Add a new connection between random two nodes in the genome
-    void AddNewConnection(Genome& genome);
-
-    // Add a new connection between random two nodes in the genome allowing cyclic network
-    void AddNewConnectionAllowingCyclic(Genome& genome);
-
-    // Add a new connection between random two nodes in the genome without allowing cyclic network
-    // Direction of the new connection is guaranteed to be forward (distance from the input layer to in-node is smaller than the one for out-node)
-    void AddNewForwardConnection(Genome& genome);
-
-    auto GetNodeCandidatesAsOutNodeOfNewConnection(const Genome& genome) const -> std::vector<NodeGeneId>;
-
-    bool CheckCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
-
-    // Perform cross over operation over two genomes and generate a new genome
-    // This function assumes that genome1 has a higher fitness value than genome2
-    auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const -> Genome;
-
-    // Implementation of generating a new generation
-    void GenerateNewGeneration(bool printFitness);
-
-    void EvaluateGeneration();
-
-    void SelectGenomes();
-
-    void Mutate(Generation& generation);
-
-    // Make sure that the same topological changes have the same id
-    void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes);
-
-    void Speciation(Generation& g, std::vector<Score>& scores);
-
-    // Calculate distance between two genomes based on their topologies and weights
-    float CalculateDistance(const Genome& genome1, const Genome& genome2) const;
-
-    void UpdateSpecies();
-
-protected:
+    // Connect the two nodes and assign the weight
+    auto Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float weight)->InnovationId;
 
     // Evaluate a genome and return its fitness
     virtual float Evaluate(const Genome& genom) const;
@@ -277,27 +251,101 @@ protected:
     // Evaluate value of each node recursively
     void EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const;
 
+    // Set up node used for the initial network
     virtual void SetupInitialNodeGenes();
 
     // Create default genome for the initial generation
-    virtual auto CreateDefaultInitialGenome() const -> Genome;
-
-    auto SelectRandomeGenome() -> Genome&;
-
-    auto SelectRandomNodeGene(const std::vector<NodeGeneId>& genes) const -> NodeGeneId;
-
-    auto SelectRandomNodeGene(const Genome& genome) const -> NodeGeneId;
-
-    auto SelectRandomConnectionGene(const std::vector<InnovationId>& genes) const -> InnovationId;
-
-    auto SelectRandomConnectionGene(const Genome& genome) const -> InnovationId;
+    virtual auto CreateDefaultInitialGenome()->Genome;
 
     //void RemoveStaleGenes();
 
-    auto GetConnectionGene(Genome& genome, InnovationId innovId) const -> ConnectionGene*;
+    inline auto SelectRandomeGenome()->Genome &;
 
-    auto GetConnectionGene(const Genome& genome, InnovationId innovId) const -> const ConnectionGene*;
+    inline auto SelectRandomNodeGene(const std::vector<NodeGeneId>& genes) const->NodeGeneId;
+
+    inline auto SelectRandomNodeGene(const Genome& genome) const->NodeGeneId;
+
+    inline auto SelectRandomConnectionGene(const std::vector<InnovationId>& genes) const->InnovationId;
+
+    inline auto SelectRandomConnectionGene(const Genome& genome) const->InnovationId;
+
+    inline auto GetConnectionGene(Genome& genome, InnovationId innovId) const->ConnectionGene*;
+
+    inline auto GetConnectionGene(const Genome& genome, InnovationId innovId) const -> const ConnectionGene*;
+
+    inline auto GetNodeGene(NodeGeneId nodeGeneId) const -> const NodeGene&;
+
+    inline float GetRandomWeight() const;
+    inline float GetRandomProbability() const;
 
     bool CheckSanity(const Genome& genome) const;
+
+private:
+
+    inline auto AccessGenome(int index) -> Genome&;
+    inline auto GetGenome(int index) const -> const Genome&;
+    inline int GetNumGenomes() const;
+
+    // Add a new node at a random connection in the genome
+    auto AddNewNode(Genome& genome)->NodeAddedInfo;
+
+    // Add a new connection between random two nodes in the genome allowing cyclic network
+    // If allowCyclic, direction of the new connection is guaranteed to be forward (distance from the input layer to in-node is smaller than the one for out-node)
+    void AddNewConnection(Genome& genome, bool allowCyclic);
+
+    // Return false if adding a connection between srcNode to targetNode makes the network cyclic
+    bool CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
+
+    // Perform cross over operation over two genomes and generate a new genome
+    auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const->Genome;
+
+    void GetIncompatibleRegionRecursive(NodeGeneId current, const Genome* base, const Genome* other, IncompatibleRegion& incompatible) const;
+
+    // Implementation of generating a new generation
+    void GenerateNewGeneration(bool printFitness);
+
+    void SelectGenomes();
+
+    void Mutate();
+
+    // Make sure that the same topological changes have the same id
+    void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes);
+
+    void Speciation();
+
+    // Calculate distance between two genomes based on their topologies and weights
+    float CalculateDistance(const Genome& genome1, const Genome& genome2) const;
+
+public:
+
+    Configration m_config;
+
+protected:
+
+    Generation m_generation;
+
+    std::vector<Score> m_scores;
+
+    FitnessFunc m_fitnessFunc;
+
+    ActivationFuncId m_defaultActivationFuncId = 0;
+    std::vector<ActivationFunc> m_activationFuncs;
+
+    std::unordered_map<NodePair, InnovationId, PairHash> m_innovationHistory;
+
+    bool m_isInitialized = false;
+
+private:
+
+    InnovationId m_currentInnovationId = 0;
+    SpeciesId m_currentSpeciesId = 0;
+
+    // Buffer for next gen genomes to swap with the current gen
+    GenomeList m_nextGenGenomesBuffer = nullptr;
+
+    static std::default_random_engine s_randomGenerator;
+
+    friend class NEAT_UnitTest;
 };
 
+#include "NEAT.inl"
