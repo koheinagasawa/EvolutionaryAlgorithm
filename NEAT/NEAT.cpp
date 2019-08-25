@@ -6,7 +6,7 @@
 #include <fstream>
 #include <iostream>
 
-std::default_random_engine NEAT::s_randomGenerator(1);
+std::default_random_engine NEAT::s_randomGenerator(3);
 
 #define TEST_PREVENT_TO_ADD_NEW_CONNECTION_TO_DEADEND_HIDDEN_NODE 1
 
@@ -24,7 +24,7 @@ auto NEAT::Initialize(const Configration& configIn) -> const Generation &
     Reset();
 
     // Sanity checks
-    if (m_config.m_numOrganismsInGeneration == 0)
+    if (m_config.m_numGenomesInGeneration == 0)
     {
         // TODO: Add some useful warning message here
         return m_generation;
@@ -43,7 +43,7 @@ auto NEAT::Initialize(const Configration& configIn) -> const Generation &
     SetupInitialNodeGenes();
 
     // Populate the first generation with default genomes
-    for (uint32_t i = 0; i < m_config.m_numOrganismsInGeneration; ++i)
+    for (int i = 0; i < m_config.m_numGenomesInGeneration; ++i)
     {
         AccessGenome(i) = CreateDefaultInitialGenome();
     }
@@ -67,7 +67,7 @@ void NEAT::Reset()
     auto allocateGenomesBuffer = [this](GenomeList& buffer)
     {
         buffer = std::make_shared<std::vector<Genome>>();
-        buffer->resize(m_config.m_numOrganismsInGeneration);
+        buffer->resize(m_config.m_numGenomesInGeneration);
     };
 
     // Allocate buffer for genomes
@@ -88,7 +88,7 @@ void NEAT::Reset()
     m_currentSpeciesId = 0;
 
     // Allocate memory for scores
-    m_scores.resize(m_config.m_numOrganismsInGeneration);
+    m_scores.resize(m_config.m_numGenomesInGeneration);
 }
 
 // Gain the new generation
@@ -134,9 +134,9 @@ void NEAT::PrintFitness() const
     const Species* bestSpecies = nullptr;
     for (const auto& sp : m_generation.m_species)
     {
-        if (sp.m_id == bestSpeciesId)
+        if (sp->m_id == bestSpeciesId)
         {
-            bestSpecies = &sp;
+            bestSpecies = sp;
             break;
         }
     }
@@ -187,13 +187,13 @@ void NEAT::SerializeGeneration(const char* fileName) const
         {
             for (int i = 0; i < (int)m_generation.m_species.size(); ++i)
             {
-                const Species& spc = m_generation.m_species[i];
+                const Species* spc = m_generation.m_species[i];
                 printTabs(); json << "{" << endl;
                 {
                     Scope s(tabLevel);
-                    printTabs(); json << "\"Id\" : " << spc.m_id << "," << endl;
-                    printTabs(); json << "\"BestScore\" : " << spc.m_bestScore.m_fitness << "," << endl;
-                    printTabs(); json << "\"BestScoreGenomeIndex\" : " << spc.m_bestScore.m_index << endl;
+                    printTabs(); json << "\"Id\" : " << spc->m_id << "," << endl;
+                    printTabs(); json << "\"BestScore\" : " << spc->m_bestScore.m_fitness << "," << endl;
+                    printTabs(); json << "\"BestScoreGenomeIndex\" : " << spc->m_bestScore.m_index << endl;
                 }
                 printTabs(); json << "}";
 
@@ -582,6 +582,7 @@ bool NEAT::CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNod
     std::vector<int> flag;
     flag.resize((int)m_generation.m_nodeGenes.size() / sizeof(int) + 1, 0);
 
+    // Test if we can reach to the targetNode from srcNode by following connections reversely
     std::stack<NodeGeneId> stack;
     stack.push(srcNode);
     while (!stack.empty())
@@ -589,22 +590,27 @@ bool NEAT::CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNod
         const NodeGeneId node = stack.top();
         stack.pop();
 
+        // Test all incoming connections of this node
         for (const InnovationId innovId : genome.GetIncommingConnections(node))
         {
             const ConnectionGene* con = GetConnectionGene(genome, innovId);
             assert(con);
 
+            // Ignore disabled node
             if (!con->m_enabled) continue;
 
             const NodeGeneId inNode = con->m_inNode;
 
             if (inNode == targetNode)
             {
+                // Reached to the target node
+                // The new connection will make the network cyclic
                 return false;
             }
 
             const int index = inNode / sizeof(int);
             const int offset = inNode % sizeof(int);
+            // Add this node to the stack if we haven't yet
             if (((flag[index] >> offset) & 1) == 0)
             {
                 stack.push(inNode);
@@ -614,6 +620,639 @@ bool NEAT::CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNod
     }
 
     return true;
+}
+
+// Implementation of generating a new generation
+void NEAT::GenerateNewGeneration(bool printFitness)
+{
+    // First mutate genomes
+    Mutate();
+
+    // Second apply diversity protection treatment
+    if (m_config.m_diversityProtection == DiversityProtectionMethod::Speciation)
+    {
+        // Perform speciation
+        Speciation();
+    }
+    else if (m_config.m_diversityProtection == DiversityProtectionMethod::MorphologicalInnovationProtection)
+    {
+        // Not implemented yet
+        assert(0);
+    }
+
+    // Third select genomes to the next generation
+    SelectGenomes();
+
+    if (printFitness)
+    {
+        PrintFitness();
+    }
+}
+
+// Apply mutation
+void NEAT::Mutate()
+{
+    // Mutate weights
+    for (int i = 0; i < GetNumGenomes(); ++i)
+    {
+        Genome& genome = AccessGenome(i);
+
+        if (genome.m_protect) continue;
+
+        // For each connection
+        for (auto& elem : genome.m_connectionGenes)
+        {
+            // Invoke mutation at random rate
+            if (GetRandomProbability() < m_config.m_weightMutationRate)
+            {
+                auto& connection = elem.second;
+
+                // Perturb weight
+                if (GetRandomProbability() < m_config.m_weightPerturbationRate)
+                {
+                    RandomIntDistribution<int> randomBinary(0, 1);
+                    float sign = randomBinary(s_randomGenerator) > 0 ? 1.0f : -1.0f;
+                    connection.m_weight += sign * m_config.m_weightPerturbation;
+
+                    // Cramp weight
+                    if (connection.m_weight > m_config.m_maximumWeight) connection.m_weight = m_config.m_maximumWeight;
+                    if (connection.m_weight < m_config.m_minimumWeight) connection.m_weight = m_config.m_minimumWeight;
+                }
+
+                // Assign a completely new weight
+                if (GetRandomProbability() < m_config.m_weightNewValueRate)
+                {
+                    connection.m_weight = GetRandomWeight();
+                }
+            }
+        }
+    }
+
+    NewlyAddedNodes newNodes;
+
+    // Apply topological mutations
+    for (int i = 0; i < GetNumGenomes(); ++i)
+    {
+        Genome& genome = AccessGenome(i);
+        if (genome.m_protect)
+        {
+            continue;
+        }
+
+        // Add a new node at random rate
+        if (GetRandomProbability() < m_config.m_nodeAdditionRate)
+        {
+            NodeAddedInfo node = AddNewNode(genome);
+            if (node.m_newNode != s_invalidNodeGeneId)
+            {
+                newNodes[node.m_oldConnection].push_back(node);
+            }
+        }
+    }
+
+    // Make sure that the same topological changes have the same id
+    EnsureUniqueGeneIndices(newNodes);
+
+    for (int i = 0; i < GetNumGenomes(); ++i)
+    {
+        Genome& genome = AccessGenome(i);
+
+        if (genome.m_protect)
+        {
+            // Reset protect flag
+            genome.m_protect = false;
+            continue;
+        }
+
+        // Add a new connection at random rate
+        if (GetRandomProbability() < m_config.m_connectionAdditionRate)
+        {
+            AddNewConnection(genome, m_config.m_allowCyclicNetwork);
+        }
+    }
+}
+
+// Make sure that the same topological changes have the same id
+void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes)
+{
+    // Check duplicated newly added node genes
+    for (const auto& elem : newNodes)
+    {
+        const auto& genomes = elem.second;
+
+        // Use information of genome added first
+        const NodeAddedInfo& info = genomes[0];
+
+        // in node and out node where the new node was added
+        NodeGeneId inNode  = info.m_genome.m_connectionGenes[info.m_oldConnection].m_inNode;
+        NodeGeneId outNode = info.m_genome.m_connectionGenes[info.m_oldConnection].m_outNode;
+
+        // Update other genomes
+        for (size_t i = 1; i < genomes.size(); ++i)
+        {
+            // Genome to update
+            Genome& genome = genomes[i].m_genome;
+            const NodeAddedInfo& thisInfo = genomes[i];
+
+            // Update node links
+            assert(!genome.HasNode(info.m_newNode));
+            genome.m_nodeLinks[info.m_newNode] = genome.m_nodeLinks[thisInfo.m_newNode];
+            genome.m_nodeLinks.erase(thisInfo.m_newNode);
+
+            assert(genome.GetIncommingConnections(info.m_newNode).size() == 1);
+            assert(genome.GetOutgoingConnections(info.m_newNode).size() == 1);
+            genome.m_nodeLinks[info.m_newNode].m_incomings[0] = info.m_newConnection1;
+            genome.m_nodeLinks[info.m_newNode].m_outgoings[0] = info.m_newConnection2;
+
+            for (auto& innovId : genome.m_nodeLinks[outNode].m_incomings)
+            {
+                if (innovId == thisInfo.m_newConnection2)
+                {
+                    innovId = info.m_newConnection2;
+                    break;
+                }
+            }
+            for (auto& innovId : genome.m_nodeLinks[inNode].m_outgoings)
+            {
+                if (innovId == thisInfo.m_newConnection1)
+                {
+                    innovId = info.m_newConnection1;
+                    break;
+                }
+            }
+
+            // Update connections
+            assert(!genome.HasConnection(info.m_newConnection1));
+            genome.m_connectionGenes[info.m_newConnection1] = genome.m_connectionGenes[thisInfo.m_newConnection1];
+            genome.m_connectionGenes[info.m_newConnection1].m_innovId = info.m_newConnection1;
+            genome.m_connectionGenes[info.m_newConnection1].m_outNode = info.m_newNode;
+            genome.m_connectionGenes.erase(thisInfo.m_newConnection1);
+
+            assert(!genome.HasConnection(info.m_newConnection2));
+            genome.m_connectionGenes[info.m_newConnection2] = genome.m_connectionGenes[thisInfo.m_newConnection2];
+            genome.m_connectionGenes[info.m_newConnection2].m_innovId = info.m_newConnection2;
+            genome.m_connectionGenes[info.m_newConnection2].m_inNode = info.m_newNode;
+            genome.m_connectionGenes.erase(thisInfo.m_newConnection2);
+
+            // Fix innovation history
+            m_innovationHistory.erase(NodePair{ inNode, thisInfo.m_newNode });
+            m_innovationHistory.erase(NodePair{ thisInfo.m_newNode, outNode });
+
+            assert(CheckSanity(genome));
+        }
+    }
+}
+
+// Perform speciation
+void NEAT::Speciation()
+{
+    // Clear information of the previous generation
+    for (auto& species : m_generation.m_species)
+    {
+        // Update the best fitness
+        if (species->m_stagnantGenerationCount == 0)
+        {
+            species->m_previousBestFitness = species->GetBestFitness();
+        }
+
+        species->m_scores.clear();
+        species->m_adjustedTotalScore = 0.f;
+        species->m_adjustedScoreEliminatedLows = 0.f;
+        species->m_bestScore.m_fitness = 0.f;
+        species->m_bestScore.m_adjustedFitness = 0.f;
+        species->m_bestScore.m_index = -1;
+    }
+
+    // Assign each genome to an existing species which has close topology, or create a new one if there's none
+    for (int i = 0; i < GetNumGenomes(); ++i)
+    {
+        Genome& genome = AccessGenome(i);
+
+        // Reset species id first
+        genome.m_species = s_invalidSpeciesId;
+
+        // Evaluate the genome and store its score
+        Score& score = m_scores[i];
+        {
+            score.m_index = i;
+            score.m_adjustedFitness = 0.f;
+            score.m_fitness = Evaluate(genome);
+        }
+
+        // Check distance against each species
+        for (auto& sp : m_generation.m_species)
+        {
+            const auto& representative = sp->m_representative;
+            if (CalculateDistance(genome, representative) < m_config.m_speciationDistThreshold)
+            {
+                // Found a species for this genome
+                genome.m_species = sp->m_id;
+                sp->m_scores.push_back(score);
+
+                if (sp->GetBestFitness() < score.m_fitness)
+                {
+                    sp->m_bestScore = score;
+                }
+                break;
+            }
+        }
+
+        // No species close enough was found, create a new one
+        if (genome.m_species == s_invalidSpeciesId)
+        {
+            std::vector<Species*>& spList = m_generation.m_species;
+            spList.push_back(new Species{ m_currentSpeciesId++ });
+            Species* newSpecies = spList.back();
+            newSpecies->m_scores.push_back(score);
+            newSpecies->m_bestScore = score;
+            newSpecies->m_representative = genome;
+            genome.m_species = newSpecies->m_id;
+        }
+    }
+
+    int numSpeciesToDelete = 0;
+    for (Species* species : m_generation.m_species)
+    {
+        // Delete species which no genomes fell into
+        if (species->m_scores.size() == 0)
+        {
+            species->m_bestScore.m_fitness = 0.f;
+            ++numSpeciesToDelete;
+            continue;
+        }
+
+        // Select a random representative of this species
+        {
+            RandomIntDistribution<uint32_t> randomInt(0, species->m_scores.size() - 1);
+            int representativeIndex = species->m_scores[randomInt(s_randomGenerator)].m_index;
+            species->m_representative = GetGenome(representativeIndex);
+        }
+
+        // Check extinction
+        if (m_config.m_extinctStagnantSpecies)
+        {
+            // Check if this species has made any progress
+            if (species->m_previousBestFitness >= species->GetBestFitness())
+            {
+                // Increment stagnant generations
+                ++species->m_stagnantGenerationCount;
+
+                if (species->m_stagnantGenerationCount >= m_config.m_numGenerationsToExtinctSpecies &&
+                    GetNumSpecies() > 2)
+                {
+                    // Extinct this species
+
+                    // Clear all genomes in this species
+                    for (auto& s : species->m_scores)
+                    {
+                        m_scores[s.m_index].m_fitness = 0.f;
+                        m_scores[s.m_index].m_adjustedFitness = 0.f;
+                    }
+                    species->m_bestScore.m_fitness = 0.f;
+                    ++numSpeciesToDelete;
+                    continue;
+                }
+            }
+            else
+            {
+                // Reset stagnant count
+                species->m_stagnantGenerationCount = 0;
+            }
+        }
+
+        // Calculate adjusted fitness
+        const float denom = 1.0f / (float)species->GetNumGenomes();
+        for (auto& s : species->m_scores)
+        {
+            s.m_adjustedFitness = s.m_fitness * denom;
+            m_scores[s.m_index].m_adjustedFitness = s.m_adjustedFitness;
+            species->m_adjustedTotalScore += s.m_adjustedFitness;
+        }
+
+        // Mark the best genome as protected
+        if (species->ShouldProtectBest())
+        {
+            AccessGenome(species->m_bestScore.m_index).m_protect = true;
+        }
+
+        // Sort genomes stored in the species by fitness in descending order
+        // This is necessary to remove lowest fitness genomes during selection
+        std::sort(species->m_scores.rbegin(), species->m_scores.rend());
+    }
+
+    // Sort species in descending order
+    std::sort(m_generation.m_species.begin(), m_generation.m_species.end(), [](const Species* s1, const Species* s2)
+    {
+        return s2->m_bestScore < s1->m_bestScore;
+    });
+
+    // Delete species
+    // Because species are not sorted by best fitness, we just need to delete the last N elements in the array
+    for (int i = 0; i < numSpeciesToDelete; ++i)
+    {
+        int index = GetNumSpecies() - 1 - i;
+        assert(m_generation.m_species[index]->GetBestFitness() == 0.f);
+        assert(m_generation.m_species[index]->m_adjustedTotalScore == 0.f);
+        delete m_generation.m_species[index];
+    }
+    m_generation.m_species.resize(GetNumSpecies() - numSpeciesToDelete);
+}
+
+// Calculate distance between two genomes based on their topologies and weights
+float NEAT::CalculateDistance(const Genome& genome1, const Genome& genome2) const
+{
+    const int numConsP1 = genome1.GetNumConnections();
+    const int numConsP2 = genome2.GetNumConnections();
+    const int numConsLarge = numConsP1 > numConsP2 ? numConsP1 : numConsP2;
+    const int numConsSmall = numConsP1 > numConsP2 ? numConsP2 : numConsP1;
+    int numMismatches = 0;
+    int numMatches = 0;
+    float weightDifference = 0.f;
+
+    // Count matching and mismatching connections
+    // and accumulate difference of weights for matching genes
+    const auto& cGenes1 = genome1.m_connectionGenes;
+    const auto& cGenes2 = genome2.m_connectionGenes;
+    auto itr1 = cGenes1.begin();
+    auto itr2 = cGenes2.begin();
+    while (itr1 != cGenes1.end() && itr2 != cGenes2.end())
+    {
+        const ConnectionGene& cGene1 = itr1->second;
+        const ConnectionGene& cGene2 = itr2->second;
+        if (cGene1.m_innovId == cGene2.m_innovId)
+        {
+            // [TODO]: Should we treat weight of disabled gene as zero?
+            weightDifference += std::fabs(cGene1.m_weight - cGene2.m_weight);
+            ++numMatches;
+            ++itr1;
+            ++itr2;
+        }
+        else
+        {
+            ++numMismatches;
+            if (cGene1.m_innovId < cGene2.m_innovId)
+                ++itr1;
+            else
+                ++itr2;
+        }
+    }
+
+    while (itr1 != cGenes1.end())
+    {
+        ++numMismatches;
+        ++itr1;
+    }
+    while (itr2 != cGenes2.end())
+    {
+        ++numMismatches;
+        ++itr2;
+    }
+
+    if (numMatches == 0)
+    {
+        return std::numeric_limits<float>::max();
+    }
+    else
+    {
+        return (float)numMismatches / (float)(numConsSmall >= 20 ? numConsLarge : 1) +
+            m_config.m_weightScaleForDistance * (weightDifference / (float)numMatches);
+    }
+}
+
+// Select genomes to the next generation
+void NEAT::SelectGenomes()
+{
+    // List of genomes and their scores to inherit to the next generation
+    std::vector<Score> genomesToInherit;
+    genomesToInherit.reserve(GetNumGenomes());
+
+    // Compute sum of adjusted scores of all genomes
+    float adjustedScoreSum = 0;
+    for (const auto s : m_generation.m_species)
+    {
+        adjustedScoreSum += s->m_adjustedTotalScore;
+    }
+
+    // Temporary buffer to store genomes newly created by cross over
+    std::vector<Genome> newGenomes;
+
+    // Distribute population over the species and inherit genomes from each species
+    {
+        const int totalPopulationForSpecies = int(GetNumGenomes() * (1.0f - m_config.m_interSpeciesMatingRate));
+        const float invAdjustedScoreSum = 1.0f / adjustedScoreSum;
+        for (Species* sp : m_generation.m_species)
+        {
+            const int numGenomes = sp->GetNumGenomes();
+
+            // Remove lowest fitness genomes from selection
+            // and adjust total score of this species by subtracting scores from those low genomes
+            const int numGenomesToRemove = (int)(sp->m_scores.size() * m_config.m_lowerGenomeEliminationRate);
+            sp->m_adjustedScoreEliminatedLows = sp->m_adjustedTotalScore;
+            for (int i = numGenomes - numGenomesToRemove; i < numGenomes; ++i)
+            {
+                sp->m_adjustedScoreEliminatedLows -= sp->m_scores[i].m_adjustedFitness;
+            }
+
+            // Calculate allocated population for this species
+            const int spPopulation = int(totalPopulationForSpecies * sp->m_adjustedTotalScore * invAdjustedScoreSum);
+
+            // Counter of population of this species
+            int population = 0;
+
+            // Guarantee that the best genomes is copied to the next gen if this species is big enough, 
+            if (sp->ShouldProtectBest())
+            {
+                genomesToInherit.push_back(sp->m_scores[0]);
+                ++population;
+            }
+
+            // Copy some genomes to the next gen
+            {
+                const int numGenomesToCopy = int(spPopulation * (1.f - m_config.m_crossOverRate));
+                for (; population < numGenomesToCopy; ++population)
+                {
+                    genomesToInherit.push_back(SelectGenome(GetRandomValue(sp->m_adjustedScoreEliminatedLows), sp->m_scores));
+                }
+            }
+
+            // The rest of population is generated by cross over
+            while (population < spPopulation)
+            {
+                genomesToInherit.push_back(GetInheritanceFromSpecies(*sp, newGenomes));
+                ++population;
+            }
+        }
+
+        assert((int)genomesToInherit.size() <= GetNumGenomes());
+
+        // It's possible that entire population hasn't reached to totalPopulationForSpecies yet
+        // due to rounding population of each species from float to int.
+        // For remaining population, we just select random species and perform cross over.
+        for (int i = (int)genomesToInherit.size(); i < totalPopulationForSpecies; ++i)
+        {
+            auto getSpecies = [this](float f) -> Species*
+            {
+                float currentSum = 0;
+                for (Species* s : m_generation.m_species)
+                {
+                    currentSum += s->m_adjustedTotalScore;
+                    if (currentSum > f)
+                    {
+                        return s;
+                    }
+                }
+
+                assert(0);
+                return nullptr;
+            };
+
+            Species* sp = getSpecies(GetRandomValue(adjustedScoreSum));
+            genomesToInherit.push_back(GetInheritanceFromSpecies(*sp, newGenomes));
+        }
+
+        assert((int)genomesToInherit.size() <= GetNumGenomes());
+    }
+
+    // For the rest of population, perform inter-species cross over
+    for (int i = (int)genomesToInherit.size(); i < GetNumGenomes(); ++i)
+    {
+        // Select random two genomes
+        const Score* g1 = &SelectGenome(GetRandomValue(adjustedScoreSum), m_scores);
+        const Score* g2 = g1;
+        while (g1 == g2)
+        {
+            // Ensure we select different genomes
+            g2 = &SelectGenome(GetRandomValue(adjustedScoreSum), m_scores);
+        }
+
+        // Ensure the genome at i1 has a higher fitness
+        if (g1->m_fitness < g2->m_fitness)
+        {
+            std::swap(g1, g2);
+        }
+
+        // Cross over
+        newGenomes.push_back(CrossOver(
+            GetGenome(g1->m_index),
+            g1->m_fitness,
+            GetGenome(g2->m_index),
+            g2->m_fitness));
+
+        Genome& newGenome = newGenomes.back();
+
+        const float fitness = Evaluate(newGenome);
+
+        // Protect this species if it is the best among the generation
+        // Note that we don't know which species this genome is yet, so we cannot update species protect flag etc
+        if (fitness >= m_generation.m_species[0]->GetBestFitness())
+        {
+            newGenome.m_protect = true;
+        }
+
+        // We will use m_adjustedFitness == -1 later to indicate that this genome has newly generated
+        genomesToInherit.push_back(Score{ fitness, -1.f, (int)newGenomes.size() - 1 });
+    }
+
+    assert((int)genomesToInherit.size() == GetNumGenomes());
+
+    // Sort scores in descending order
+    std::sort(genomesToInherit.rbegin(), genomesToInherit.rend());
+
+    // Copy genomes to the next gen
+    for (int i = 0; i < GetNumGenomes(); ++i)
+    {
+        int index = genomesToInherit[i].m_index;
+        (*m_nextGenGenomesBuffer)[i] = genomesToInherit[i].m_adjustedFitness > 0 ? AccessGenome(index) : newGenomes[index];
+    }
+
+#ifdef _DEBUG
+    {
+        // Clear genome indices stored in species
+        for (Species* s : m_generation.m_species)
+        {
+            for (Score& sc : s->m_scores)
+            {
+                sc.m_index = -1;
+            }
+
+            s->m_bestScore.m_index = -1;
+        }
+
+        // Check if the best fitness is not regressed
+        if (Evaluate((*m_generation.m_genomes)[0]) > Evaluate((*m_nextGenGenomesBuffer)[0]) &&
+            m_generation.m_species[0]->ShouldProtectBest())
+        {
+            std::cout << "!!! Fitness Regressed !!!" << std::endl;
+        }
+    }
+#endif
+
+    // Swap buffers of genomes
+    GenomeList tmp = m_generation.m_genomes;
+    m_generation.m_genomes = m_nextGenGenomesBuffer;
+    m_nextGenGenomesBuffer = tmp;
+
+    // Increment generation
+    m_generation.m_generationId++;
+}
+
+// Get genome and its score to inherit from a species
+auto NEAT::GetInheritanceFromSpecies(Species& sp, std::vector<Genome>& newGenomes) -> Score
+{
+    // If there's only one genome in this species, just copy it.
+    if (sp.GetNumGenomes() == 1)
+    {
+        return sp.m_scores[0];
+    }
+
+    // Select random two genomes
+    const Score* g1 = &SelectGenome(GetRandomValue(sp.m_adjustedScoreEliminatedLows), sp.m_scores);
+    const Score* g2 = g1;
+    while (g1 == g2)
+    {
+        // Ensure we select different genomes
+        g2 = &SelectGenome(GetRandomValue(sp.m_adjustedScoreEliminatedLows), sp.m_scores);
+    }
+
+    // Ensure g1 has a higher fitness
+    if (g1->m_fitness < g2->m_fitness)
+    {
+        std::swap(g1, g2);
+    }
+
+    // Perform cross over
+    newGenomes.push_back(CrossOver(
+        GetGenome(g1->m_index),
+        g1->m_fitness,
+        GetGenome(g2->m_index),
+        g2->m_fitness));
+
+    Genome& newGenome = newGenomes.back();
+    newGenome.m_species = sp.m_id;
+
+    // Evaluate fitness of the new genome
+    const float fitness = Evaluate(newGenome);
+
+    // Update protect flag and best fitness of this species
+    if (sp.ShouldProtectBest() && fitness >= sp.GetBestFitness())
+    {
+        newGenome.m_protect = true;
+        if (fitness > sp.GetBestFitness())
+        {
+            AccessGenome(sp.GetBestGenome()).m_protect = false;
+            sp.m_bestScore.m_fitness = fitness;
+
+            // Note that we cannot update m_bestScore.m_index here
+            // because index of this genome in the next generation hasn't been determined.
+            // It will be confirmed after sorting all the genomes.
+            // This shouldn't be a problem because all information we are using about
+            // best score in this function is just fitness.
+            // So updating just fitness should be sufficient.
+        }
+    }
+
+    // We will use m_adjustedFitness == -1 later to indicate that this genome has newly generated
+    return Score{ fitness, -1.f, (int)newGenomes.size() - 1 };
 }
 
 // Perform cross over operation over two genomes and generate a new genome
@@ -633,167 +1272,11 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
     // Create a new genome
     Genome child;
 
-    // Try to add a consecutive incompatible region to the child genome as a batch
-    auto TryAddIncompatibleRegion = [this, &child](
-        const NodeGeneId incompatibleNode,
-        const Genome* base,
-        const Genome* other)
-    {
-        IncompatibleRegion ir;
-        GetIncompatibleRegionRecursive(incompatibleNode, base, other, ir);
-
-        std::vector<NodeGeneId> nodesAdded;
-        nodesAdded.reserve(ir.m_nodes.size());
-        for (NodeGeneId node : ir.m_nodes)
-        {
-            if (child.m_nodeLinks.find(node) == child.m_nodeLinks.end())
-            {
-                child.m_nodeLinks.insert({ node, Genome::Links() });
-                nodesAdded.push_back(node);
-            }
-        }
-
-        std::vector<InnovationId> connectionsAdded;
-        connectionsAdded.reserve(ir.m_connections.size());
-        bool cyclic = false;
-        for (auto itr = ir.m_connections.begin(); itr != ir.m_connections.end(); ++itr)
-        {
-            if (child.m_connectionGenes.find(*itr) == child.m_connectionGenes.end())
-            {
-                const ConnectionGene& c = base->m_connectionGenes.at(*itr);
-                if (m_config.m_allowCyclicNetwork || CanAddConnectionWithoutCyclic(child, c.m_inNode, c.m_outNode))
-                {
-                    ConnectionGene newCon = c;
-                    child.m_connectionGenes[newCon.m_innovId] = newCon;
-                    child.m_nodeLinks[c.m_outNode].m_incomings.push_back(c.m_innovId);
-                    child.m_nodeLinks[c.m_inNode].m_outgoings.push_back(c.m_innovId);
-                    if (newCon.m_enabled)
-                    {
-                        child.m_nodeLinks[c.m_outNode].m_numEnabledIncomings++;
-                        child.m_nodeLinks[c.m_inNode].m_numEnabledOutgoings++;
-                    }
-                    connectionsAdded.push_back(c.m_innovId);
-                }
-                else
-                {
-                    // Abort adding this region when it causes cyclic network
-                    cyclic = true;
-                    break;
-                }
-            }
-        }
-
-        if (cyclic)
-        {
-            for (NodeGeneId node : nodesAdded)
-            {
-                child.m_nodeLinks.erase(node);
-            }
-
-            for (InnovationId iid : connectionsAdded)
-            {
-                const ConnectionGene& c = child.m_connectionGenes[iid];
-                {
-                    if (child.m_nodeLinks.find(c.m_inNode) != child.m_nodeLinks.end())
-                    {
-                        Genome::Links& links = child.m_nodeLinks[c.m_inNode];
-                        for (auto i = links.m_outgoings.begin(); i != links.m_outgoings.end(); ++i)
-                        {
-                            if (*i == iid)
-                            {
-                                links.m_outgoings.erase(i);
-                                if (c.m_enabled)
-                                {
-                                    links.m_numEnabledOutgoings--;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-                {
-                    if (child.m_nodeLinks.find(c.m_outNode) != child.m_nodeLinks.end())
-                    {
-                        Genome::Links& links = child.m_nodeLinks[c.m_outNode];
-                        for (auto i = links.m_incomings.begin(); i != links.m_incomings.end(); ++i)
-                        {
-                            if (*i == iid)
-                            {
-                                links.m_incomings.erase(i);
-                                if (c.m_enabled)
-                                {
-                                    links.m_numEnabledIncomings--;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                child.m_connectionGenes.erase(iid);
-            }
-        }
-    };
-
-    // Try to add the given connection to the child genome
-    auto TryAddConnection = [this, &child, &TryAddIncompatibleRegion](
-        const ConnectionGene& connection,
-        const Genome* base,
-        const Genome* other,
-        bool enable)
-    {
-        // Check if we've already added this connection
-        if (child.HasConnection(connection.m_innovId))
-        {
-            return;
-        }
-
-        const NodeGeneId inNode = connection.m_inNode;
-        const NodeGeneId outNode = connection.m_outNode;
-
-        assert(base->HasNode(inNode));
-        assert(base->HasNode(outNode));
-
-        // If Either in or out node doesn't exist in the other parent,
-        // we try to add the entire consecutive incompatible regions as a batch instead of just a single connection
-        bool hasIncompatibleNode = false;
-        if (!other->HasNode(inNode))
-        {
-            TryAddIncompatibleRegion(inNode, base, other);
-            hasIncompatibleNode = true;
-        }
-        if (!other->HasNode(outNode))
-        {
-            TryAddIncompatibleRegion(outNode, base, other);
-            hasIncompatibleNode = true;
-        }
-        if (hasIncompatibleNode)
-        {
-            return;
-        }
-
-        // Make sure that child genome has both in and out nodes
-        if (!child.HasNode(inNode))  child.AddNode(inNode);
-        if (!child.HasNode(outNode)) child.AddNode(outNode);
-
-        // Force to disable connection when it causes cyclic network
-        if (!m_config.m_allowCyclicNetwork && !CanAddConnectionWithoutCyclic(child, inNode, outNode))
-        {
-            enable = false;
-        }
-
-        // Add new connection
-        ConnectionGene newCon = connection;
-        newCon.m_enabled = enable;
-        child.AddConnection(newCon);
-    };
-
-    // Inherit connection genes from the two parents
     RandomIntDistribution<int> randomBinary(0, 1);
 
+    // Inherit connection genes from the two parents
     const auto& cGenes1 = parent1->m_connectionGenes;
     const auto& cGenes2 = parent2->m_connectionGenes;
-
     auto itr1 = cGenes1.begin();
     auto itr2 = cGenes2.begin();
 
@@ -846,13 +1329,13 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
                 *geneToInherit,
                 fromP1 ? parent1 : parent2,
                 fromP1 ? parent2 : parent1,
-                enabled);
+                enabled, child);
         }
     }
 
     // Add remaining genes
     {
-        auto AddRemainingGenes = [&TryAddConnection, &randomBinary](
+        auto AddRemainingGenes = [this, &randomBinary, &child](
             bool randomize,
             const Genome* base,
             const Genome* other,
@@ -863,7 +1346,9 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
                 if (!randomize || randomBinary(s_randomGenerator))
                 {
                     const ConnectionGene& gene = itr->second;
-                    TryAddConnection(gene, base, other, gene.m_enabled);
+                    // Disable gene at a certain probability when the parent's one is disabled
+                    bool enabled = gene.m_enabled ? true : GetRandomProbability() >= m_config.m_geneDisablingRate;
+                    TryAddConnection(gene, base, other, enabled, child);
                 }
                 ++itr;
             }
@@ -879,741 +1364,132 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
         }
     }
 
-    // [TODO] Investigate why. Maybe just printFitness function would access to it?
-    child.m_species = parent1->m_species;
-
     assert(CheckSanity(child));
 
     return child;
 }
 
-void NEAT::GetIncompatibleRegionRecursive(NodeGeneId current, const Genome* base, const Genome* other, IncompatibleRegion& incompatible) const
+// Try to add the given connection to the child genome
+void NEAT::TryAddConnection(const ConnectionGene& connection, const Genome* base, const Genome* other, bool enable, Genome& child) const
 {
-    assert(base->m_nodeLinks.find(current) != base->m_nodeLinks.end());
-
-    if (incompatible.m_nodes.find(current) == incompatible.m_nodes.end())
+    // Check if we've already added this connection
+    if (child.HasConnection(connection.m_innovId))
     {
-        incompatible.m_nodes.insert(current);
-        if (other->m_nodeLinks.find(current) == other->m_nodeLinks.end())
+        return;
+    }
+
+    const NodeGeneId inNode = connection.m_inNode;
+    const NodeGeneId outNode = connection.m_outNode;
+
+    assert(base->HasNode(inNode));
+    assert(base->HasNode(outNode));
+
+    // If either in or out node doesn't exist in the other parent,
+    // we try to add the entire consecutive incompatible regions as a batch instead of just a single connection
+    {
+        bool hasIncompatibleNode = false;
+
+        // NOTE: even if both inNode and outNode are incompatible, 
+        // calling TryAddIncompatibleRegion only once should be sufficient because
+        // we are adding all nodes and connections of consecutive incompatible region
+        // hence else if below
+        if (!other->HasNode(inNode))
         {
-            const Genome::Links& links = base->m_nodeLinks.at(current);
-            for (InnovationId iid : links.m_incomings)
-            {
-                incompatible.m_connections.insert(iid);
-                GetIncompatibleRegionRecursive(base->m_connectionGenes.at(iid).m_inNode, base, other, incompatible);
-            }
-            for (InnovationId iid : links.m_outgoings)
-            {
-                incompatible.m_connections.insert(iid);
-                GetIncompatibleRegionRecursive(base->m_connectionGenes.at(iid).m_outNode, base, other, incompatible);
-            }
+            TryAddIncompatibleRegion(inNode, base, other, child);
+            hasIncompatibleNode = true;
         }
+        else if (!other->HasNode(outNode))
+        {
+            TryAddIncompatibleRegion(outNode, base, other, child);
+            hasIncompatibleNode = true;
+        }
+        if (hasIncompatibleNode)
+        {
+            return;
+        }
+    }
+
+    // Make sure that child genome has both in and out nodes
+    if (!child.HasNode(inNode))  child.AddNode(inNode);
+    if (!child.HasNode(outNode)) child.AddNode(outNode);
+
+    // Force to disable connection when it causes cyclic network
+    if (!m_config.m_allowCyclicNetwork && !CanAddConnectionWithoutCyclic(child, inNode, outNode))
+    {
+        enable = false;
+    }
+
+    // Add new connection
+    ConnectionGene newCon = connection;
+    newCon.m_enabled = enable;
+    child.AddConnection(newCon);
+}
+
+// Try to add a consecutive incompatible region to the child genome as a batch
+void NEAT::TryAddIncompatibleRegion(const NodeGeneId incompatibleNode, const Genome* base, const Genome* other, Genome& child) const
+{
+    // Collect connections connected to incompatible nodes which exist only in base but not in other
+    std::set<InnovationId> incompatibleConnections;
+    GetIncompatibleRegionRecursive(incompatibleNode, base, other, incompatibleConnections);
+
+    // Add connections
+    for (InnovationId iid : incompatibleConnections)
+    {
+        assert(!child.HasConnection(iid));
+
+        const ConnectionGene* c = GetConnectionGene(*base, iid);
+        assert(c);
+
+        const NodeGeneId inNode = c->m_inNode;
+        const NodeGeneId outNode = c->m_outNode;
+
+        // Make sure that child genome has both in and out nodes
+        if (!child.HasNode(inNode))  child.AddNode(inNode);
+        if (!child.HasNode(outNode)) child.AddNode(outNode);
+
+        // Disable gene at a certain probability when the parent's one is disabled
+        bool enabled = c->m_enabled ? true : GetRandomProbability() >= m_config.m_geneDisablingRate;;
+
+        // Force to disable connection when it causes cyclic network
+        if (!m_config.m_allowCyclicNetwork && !CanAddConnectionWithoutCyclic(child, inNode, outNode))
+        {
+            enabled = false;
+        }
+
+        // Add new connection
+        ConnectionGene newCon = *c;
+        newCon.m_enabled = enabled;
+        child.AddConnection(newCon);
     }
 }
 
-// Implementation of generating a new generation
-void NEAT::GenerateNewGeneration(bool printFitness)
+// Collect connections connected to incompatible nodes which exist only in base but not in other
+void NEAT::GetIncompatibleRegionRecursive(NodeGeneId current, const Genome* base, const Genome* other, std::set<InnovationId>& incompatibleConnections) const
 {
-    Mutate();
+    assert(base->HasNode(current));
 
-    if (m_config.m_diversityProtection == DiversityProtectionMethod::Speciation)
+    if (other->HasNode(current))
     {
-        for (uint32_t i = 0; i < m_config.m_numOrganismsInGeneration; ++i)
-        {
-            m_scores[i] = Score{ Evaluate(GetGenome(i)), 0.f, i };
-        }
-
-        Speciation();
-    }
-    else if (m_config.m_diversityProtection == DiversityProtectionMethod::MorphologicalInnovationProtection)
-    {
-        // Not implemented yet
-        assert(0);
+        // Boundary of incompatible region
+        return;
     }
 
-    SelectGenomes();
-
-    if (printFitness)
+    // Expand incompatible region recursively and collect connections
+    for (InnovationId iid : base->GetIncommingConnections(current))
     {
-        // Sort species by best score fitness
-        std::sort(m_generation.m_species.begin(), m_generation.m_species.end(), [](const Species& s1, const Species& s2)
+        if (incompatibleConnections.find(iid) == incompatibleConnections.end())
         {
-            return s1.m_bestScore.m_fitness > s2.m_bestScore.m_fitness;
-        });
-
-        PrintFitness();
-    }
-}
-
-void NEAT::SelectGenomes()
-{
-    std::vector<Score> genomesToInherit;
-    genomesToInherit.reserve(GetNumGenomes());
-
-    float adjustedScoreSum = 0;
-    for (const auto& s : m_generation.m_species)
-    {
-        adjustedScoreSum += s.m_adjustedTotalScore;
-    }
-
-    RandomRealDistribution<float> genomeSelector(0, adjustedScoreSum);
-    auto getGenome = [](float f, const std::vector<Score>& scores) -> const Score&
-    {
-        float currentSum = 0;
-        for (const auto& score : scores)
-        {
-            currentSum += score.m_adjustedFitness;
-            if (currentSum >= f)
-            {
-                return score;
-            }
-        }
-
-        return scores.back();
-    };
-
-    bool canCrossOver = false;
-    if (m_config.m_enableCrossOver)
-    {
-        for (const auto& sp : m_generation.m_species)
-        {
-            if (sp.m_scores.size() > 1)
-            {
-                canCrossOver = true;
-                break;
-            }
+            incompatibleConnections.insert(iid);
+            GetIncompatibleRegionRecursive(base->m_connectionGenes.at(iid).m_inNode, base, other, incompatibleConnections);
         }
     }
-
-    std::vector<Genome> newGenomes;
-
-    // Distribute population over the species
+    for (InnovationId iid : base->GetOutgoingConnections(current))
     {
-        const int totalPopulation = int(GetNumGenomes() * (1.0f - m_config.m_interSpeciesMatingRate));
-        const float invAdjustedScoreSum = 1.0f / adjustedScoreSum;
-        for (const Species& sp : m_generation.m_species)
+        if (incompatibleConnections.find(iid) == incompatibleConnections.end())
         {
-            // Remove lowest fitness genomes from selection
-            const int numGenomesToRemove = sp.m_scores.size() / 5;
-            float totalScore = sp.m_adjustedTotalScore;
-            for (int i = 0; i < numGenomesToRemove; ++i)
-            {
-                totalScore -= sp.m_scores[sp.m_scores.size() - 1 - i].m_adjustedFitness;
-            }
-
-            RandomRealDistribution<float> genomeInSpeciesSelector(0, totalScore);
-
-            const int spPopulation = (int)(totalPopulation * sp.m_adjustedTotalScore * invAdjustedScoreSum);
-            const int numOrgsToCopy = canCrossOver ? int(spPopulation * (1.f - m_config.m_crossOverRate)) : spPopulation;
-
-            if (/*numOrgsToCopy > 0 && */sp.ShouldProtectBest())
-            {
-                genomesToInherit.push_back(sp.m_scores[0]);
-            }
-
-            // Just copy high score genomes to the next generation
-            for (int i = (int)genomesToInherit.size(); i < numOrgsToCopy; ++i)
-            {
-                genomesToInherit.push_back(getGenome(genomeInSpeciesSelector(s_randomGenerator), sp.m_scores));
-            }
-
-            for (int i = (int)genomesToInherit.size(); i < spPopulation; ++i)
-            {
-                if (sp.m_scores.size() == 1)
-                {
-                    genomesToInherit.push_back(sp.m_scores[0]);
-                    continue;
-                }
-
-                // Select random two genomes
-                const Score* g1 = &getGenome(genomeInSpeciesSelector(s_randomGenerator), sp.m_scores);
-                const Score* g2 = &getGenome(genomeInSpeciesSelector(s_randomGenerator), sp.m_scores);
-
-                while (g1 == g2)
-                {
-                    g2 = &getGenome(genomeInSpeciesSelector(s_randomGenerator), sp.m_scores);
-                }
-
-                // Ensure the genome at i1 has a higher fitness
-                if (g1->m_fitness < g2->m_fitness)
-                {
-                    std::swap(g1, g2);
-                }
-
-                // Cross over
-                newGenomes.push_back(CrossOver(GetGenome(g1->m_index), g1->m_fitness, GetGenome(g2->m_index), g2->m_fitness));
-                const float fitness = Evaluate(newGenomes.back());
-                if (fitness >= sp.m_bestScore.m_fitness && sp.m_scores.size() >= 5)
-                {
-                    newGenomes.back().m_protect = true;
-                    if (fitness > sp.m_bestScore.m_fitness)
-                    {
-                        AccessGenome(sp.m_bestScore.m_index).m_protect = false;
-                    }
-                }
-                genomesToInherit.push_back(Score{ fitness, -1.f, newGenomes.size() - 1 });
-            }
+            incompatibleConnections.insert(iid);
+            GetIncompatibleRegionRecursive(base->m_connectionGenes.at(iid).m_outNode, base, other, incompatibleConnections);
         }
-
-        // Cross over remaining population
-        if (m_generation.m_species.size() == 1)
-        {
-            for (int i = (int)genomesToInherit.size(); i < GetNumGenomes(); ++i)
-            {
-                RandomRealDistribution<float> genomeSelector(0, adjustedScoreSum);
-                // Select random two genomes
-                const Score* g1 = &getGenome(genomeSelector(s_randomGenerator), m_scores);
-                const Score* g2 = &getGenome(genomeSelector(s_randomGenerator), m_scores);
-
-                while (g1 == g2)
-                {
-                    g2 = &getGenome(genomeSelector(s_randomGenerator), m_scores);
-                }
-
-                // Ensure the genome at i1 has a higher fitness
-                if (g1->m_fitness < g2->m_fitness)
-                {
-                    std::swap(g1, g2);
-                }
-
-                // Cross over
-                newGenomes.push_back(CrossOver(GetGenome(g1->m_index), g1->m_fitness, GetGenome(g2->m_index), g2->m_fitness));
-                const float fitness = Evaluate(newGenomes.back());
-                if (fitness >= m_generation.m_species[0].m_bestScore.m_fitness && m_generation.m_species[0].m_scores.size() >= 5)
-                {
-                    newGenomes.back().m_protect = true;
-                    if (fitness > m_generation.m_species[0].m_bestScore.m_fitness)
-                    {
-                        AccessGenome(m_generation.m_species[0].m_bestScore.m_index).m_protect = false;
-                    }
-                }
-                genomesToInherit.push_back(Score{ fitness, -1.f, newGenomes.size() - 1 });
-            }
-        }
-        // Perform inter species cross over
-        else
-        {
-            for (int i = (int)genomesToInherit.size(); i < GetNumGenomes(); ++i)
-            {
-                RandomRealDistribution<float> speciesSelector(0, adjustedScoreSum);
-                auto getSpecies = [this](float f)
-                {
-                    float currentSum = 0;
-                    for (int i = 0; i < (int)m_generation.m_species.size(); ++i)
-                    {
-                        const auto& species = m_generation.m_species[i];
-                        currentSum += species.m_adjustedTotalScore;
-                        if (currentSum > f)
-                        {
-                            return i;
-                        }
-                    }
-
-                    return (int)m_generation.m_species.size() - 1;
-                };
-
-                const auto* sp1 = &m_generation.m_species[getSpecies(speciesSelector(s_randomGenerator))];
-                if (sp1->m_scores.size() == 1)
-                {
-                    genomesToInherit.push_back(sp1->m_scores[0]);
-                    continue;
-                }
-
-                const auto* sp2 = sp1;
-                while (sp1 == sp2)
-                {
-                    sp2 = &m_generation.m_species[getSpecies(speciesSelector(s_randomGenerator))];
-                }
-
-                RandomRealDistribution<float> genomeInSpeciesSelector1(0, sp1->m_adjustedTotalScore);
-                RandomRealDistribution<float> genomeInSpeciesSelector2(0, sp2->m_adjustedTotalScore);
-
-                // Select random two genomes
-                const Score* g1 = &getGenome(genomeInSpeciesSelector1(s_randomGenerator), sp1->m_scores);
-                const Score* g2 = &getGenome(genomeInSpeciesSelector2(s_randomGenerator), sp2->m_scores);
-
-                // Ensure the genome at i1 has a higher fitness
-                if (g1->m_fitness < g2->m_fitness)
-                {
-                    std::swap(g1, g2);
-                }
-
-                // Cross over
-                newGenomes.push_back(CrossOver(GetGenome(g1->m_index), g1->m_fitness, GetGenome(g2->m_index), g2->m_fitness));
-                const float fitness = Evaluate(newGenomes.back());
-                if (fitness >= m_generation.m_species[0].m_bestScore.m_fitness)
-                {
-                    newGenomes.back().m_protect = true;
-                }
-
-                genomesToInherit.push_back(Score{ fitness, -1.f, newGenomes.size() - 1 });
-            }
-        }
-    }
-
-
-    //for (int i = 0; i < (int)m_generation.m_species.size(); ++i)
-    //{
-    //    if (m_generation.m_species[i].m_scores.size() > 5)
-    //    {
-    //        assert(m_generation.m_species[i].m_scores[0].m_adjustedFitness > 0);
-    //        genomesToInherit.push_back(m_generation.m_species[i].m_scores[0]);
-    //    }
-    //}
-
-    //if (canCrossOver)
-    //{
-    //    RandomRealDistribution<float> randomBinary(0, 1.0f);
-
-    //    int numOrgsToCopy = GetNumGenomes() * (1.f - m_config.m_crossOverRate);
-
-    //    // Just copy high score genomes to the next generation
-    //    for (int i = (int)genomesToInherit.size(); i < numOrgsToCopy; ++i)
-    //    {
-    //        genomesToInherit.push_back(getGenome(genomeSelector(s_randomGenerator), m_scores));
-    //        assert(genomesToInherit.back().m_adjustedFitness > 0);
-    //    }
-
-    //    //std::vector<Genome> newGenomes;
-    //    //newGenomes.reserve(numOrgsToCopy - genomesToInherit.size());
-
-    //    // Rest population will be generated by cross over
-    //    for (int i = (int)genomesToInherit.size(); i < GetNumGenomes(); ++i)
-    //    {
-    //        RandomRealDistribution<float> speciesSelector(0, adjustedScoreSum);
-    //        auto getSpecies = [this](float f)
-    //        {
-    //            float currentSum = 0;
-    //            for (int i = 0; i < (int)m_generation.m_species.size(); ++i)
-    //            {
-    //                const auto& species = m_generation.m_species[i];
-    //                currentSum += species.m_adjustedTotalScore;
-    //                if (currentSum > f)
-    //                {
-    //                    return i;
-    //                }
-    //            }
-
-    //            return (int)m_generation.m_species.size() - 1;
-    //        };
-
-    //        const Score* g1 = nullptr;
-    //        const Score* g2 = nullptr;
-    //        if (m_generation.m_species.size() > 1 && randomBinary(s_randomGenerator) < m_config.m_interSpeciesMatingRate)
-    //        {
-    //            const auto* sp1 = &m_generation.m_species[getSpecies(speciesSelector(s_randomGenerator))];
-    //            if (sp1->m_scores.size() == 1)
-    //            {
-    //                genomesToInherit.push_back(sp1->m_scores[0]);
-    //                assert(genomesToInherit.back().m_adjustedFitness > 0);
-    //                continue;
-    //            }
-
-    //            const auto* sp2 = sp1;
-    //            while (sp1 == sp2)
-    //            {
-    //                sp2 = &m_generation.m_species[getSpecies(speciesSelector(s_randomGenerator))];
-    //            }
-
-    //            RandomRealDistribution<float> genomeInSpeciesSelector1(0, sp1->m_adjustedTotalScore);
-    //            RandomRealDistribution<float> genomeInSpeciesSelector2(0, sp2->m_adjustedTotalScore);
-
-    //            // Select random two genomes
-    //            g1 = &getGenome(genomeInSpeciesSelector1(s_randomGenerator), sp1->m_scores);
-    //            g2 = &getGenome(genomeInSpeciesSelector2(s_randomGenerator), sp2->m_scores);
-    //        }
-    //        else
-    //        {
-    //            const auto& sp = m_generation.m_species[getSpecies(speciesSelector(s_randomGenerator))];
-
-    //            if (sp.m_scores.size() == 1)
-    //            {
-    //                genomesToInherit.push_back(sp.m_scores[0]);
-    //                assert(genomesToInherit.back().m_adjustedFitness > 0);
-    //                continue;
-    //            }
-
-    //            RandomRealDistribution<float> genomeInSpeciesSelector(0, sp.m_adjustedTotalScore);
-
-    //            // Select random two genomes
-    //            g1 = &getGenome(genomeInSpeciesSelector(s_randomGenerator), sp.m_scores);
-    //            g2 = &getGenome(genomeInSpeciesSelector(s_randomGenerator), sp.m_scores);
-
-    //            while (g1 == g2)
-    //            {
-    //                g2 = &getGenome(genomeInSpeciesSelector(s_randomGenerator), sp.m_scores);
-    //            }
-    //        }
-
-    //        // Ensure the genome at i1 has a higher fitness
-    //        if (g1->m_fitness < g2->m_fitness)
-    //        {
-    //            std::swap(g1, g2);
-    //        }
-
-    //        // Cross over
-    //        newGenomes.push_back(CrossOver(GetGenome(g1->m_index), g1->m_fitness, GetGenome(g2->m_index), g2->m_fitness));
-
-    //        const float fitness = Evaluate(newGenomes.back());
-    //        genomesToInherit.push_back(Score{ fitness, -1.f, newGenomes.size() - 1 });
-    //    }
-    //}
-    //else
-    //{
-    //    // Just randomly select the rest population
-    //    for (int i = (int)genomesToInherit.size(); i < GetNumGenomes(); ++i)
-    //    {
-    //        genomesToInherit.push_back(getGenome(genomeSelector(s_randomGenerator), m_scores));
-    //    }
-    //}
-
-    std::sort(genomesToInherit.begin(), genomesToInherit.end(), [](const Score& s1, const Score& s2)
-    {
-        return s1.m_fitness > s2.m_fitness;
-    });
-
-    for (int i = 0; i < GetNumGenomes(); ++i)
-    {
-        int index = genomesToInherit[i].m_index;
-        (*m_nextGenGenomesBuffer)[i] = genomesToInherit[i].m_adjustedFitness > 0 ? AccessGenome(index) : newGenomes[index];
-    }
-
-    {
-        if (Evaluate((*m_generation.m_genomes)[0]) > Evaluate((*m_nextGenGenomesBuffer)[0]) &&
-            m_generation.m_species[0].m_scores.size() >= 5)
-        {
-            // Fitness regressed!
-            int a = 0;
-            a = 1;
-        }
-    }
-
-    GenomeList tmp = m_generation.m_genomes;
-    m_generation.m_genomes = m_nextGenGenomesBuffer;
-    m_nextGenGenomesBuffer = tmp;
-
-    m_generation.m_generationId++;
-}
-
-void NEAT::Mutate()
-{
-    // Mutation weights
-    for (int i = 0; i < GetNumGenomes(); ++i)
-    {
-        Genome& genome = AccessGenome(i);
-
-        if (genome.m_protect) continue;
-
-        for (auto& elem : genome.m_connectionGenes)
-        {
-            // Invoke mutation at random rate
-            if (GetRandomProbability() < m_config.m_weightMutationRate)
-            {
-                auto& connection = elem.second;
-
-                // Only perturb weight at random rate
-                if (GetRandomProbability() < m_config.m_weightPerturbationRate)
-                {
-                    RandomIntDistribution<int> randomBinary(0, 1);
-                    float sign = randomBinary(s_randomGenerator) > 0 ? 1.0f : -1.0f;
-                    connection.m_weight += sign * 0.05f;
-                    if (connection.m_weight > 1) connection.m_weight = 1.0f;
-                    if (connection.m_weight < -1) connection.m_weight = -1.f;
-                }
-
-                // Assign a completely new weight
-                if (GetRandomProbability() < m_config.m_weightNewValueRate)
-                {
-                    connection.m_weight = GetRandomWeight();
-                }
-            }
-        }
-    }
-
-    NewlyAddedNodes newNodes;
-
-    // Apply topological mutations
-    for (int i = 0; i < GetNumGenomes(); ++i)
-    {
-        Genome& genome = AccessGenome(i);
-        if (genome.m_protect)
-        {
-            continue;
-        }
-
-        // Add a new node at random rate
-        if (GetRandomProbability() < m_config.m_nodeAdditionRate)
-        {
-            NodeAddedInfo node = AddNewNode(genome);
-            if (node.m_newNode != s_invalidNodeGeneId)
-            {
-                newNodes[node.m_oldConnection].push_back(node);
-            }
-        }
-    }
-
-    EnsureUniqueGeneIndices(newNodes);
-
-    for (int i = 0; i < GetNumGenomes(); ++i)
-    {
-        const Genome& g = GetGenome(i);
-        CheckSanity(g);
-    }
-
-    for (int i = 0; i < GetNumGenomes(); ++i)
-    {
-        Genome& genome = AccessGenome(i);
-        if (genome.m_protect)
-        {
-            genome.m_protect = false;
-            continue;
-        }
-
-        // Add a new connection at random rate
-        if (GetRandomProbability() < m_config.m_connectionAdditionRate)
-        {
-            AddNewConnection(genome, m_config.m_allowCyclicNetwork);
-        }
-    }
-}
-
-// Make sure that the same topological changes have the same id
-void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes)
-{
-    // Check duplicated newly added node genes
-    for (auto& elem : newNodes)
-    {
-        auto& genomes = elem.second;
-        const auto& info = genomes[0];
-
-        NodeGeneId inNode = info.m_genome.m_connectionGenes[info.m_oldConnection].m_inNode;
-        NodeGeneId outNode = info.m_genome.m_connectionGenes[info.m_oldConnection].m_outNode;
-
-        for (size_t i = 1; i < genomes.size(); ++i)
-        {
-            const auto thisInfo = genomes[i];
-            Genome& genome = genomes[i].m_genome;
-
-            assert(genome.m_nodeLinks.find(info.m_newNode) == genome.m_nodeLinks.end());
-            genome.m_nodeLinks[info.m_newNode] = genome.m_nodeLinks[thisInfo.m_newNode];
-            genome.m_nodeLinks.erase(thisInfo.m_newNode);
-
-            assert(genome.m_nodeLinks[info.m_newNode].m_incomings.size() == 1);
-            assert(genome.m_nodeLinks[info.m_newNode].m_outgoings.size() == 1);
-            genome.m_nodeLinks[info.m_newNode].m_incomings[0] = info.m_newConnection1;
-            genome.m_nodeLinks[info.m_newNode].m_outgoings[0] = info.m_newConnection2;
-
-            for (auto& innovId : genome.m_nodeLinks[outNode].m_incomings)
-            {
-                if (innovId == thisInfo.m_newConnection2)
-                {
-                    innovId = info.m_newConnection2;
-                    break;
-                }
-            }
-            for (auto& innovId : genome.m_nodeLinks[inNode].m_outgoings)
-            {
-                if (innovId == thisInfo.m_newConnection1)
-                {
-                    innovId = info.m_newConnection1;
-                    break;
-                }
-            }
-
-            assert(genome.m_connectionGenes.find(info.m_newConnection1) == genome.m_connectionGenes.end());
-            genome.m_connectionGenes[info.m_newConnection1] = genome.m_connectionGenes[thisInfo.m_newConnection1];
-            genome.m_connectionGenes[info.m_newConnection1].m_innovId = info.m_newConnection1;
-            genome.m_connectionGenes[info.m_newConnection1].m_outNode = info.m_newNode;
-            genome.m_connectionGenes.erase(thisInfo.m_newConnection1);
-
-            assert(genome.m_connectionGenes.find(info.m_newConnection2) == genome.m_connectionGenes.end());
-            genome.m_connectionGenes[info.m_newConnection2] = genome.m_connectionGenes[thisInfo.m_newConnection2];
-            genome.m_connectionGenes[info.m_newConnection2].m_innovId = info.m_newConnection2;
-            genome.m_connectionGenes[info.m_newConnection2].m_inNode = info.m_newNode;
-            genome.m_connectionGenes.erase(thisInfo.m_newConnection2);
-
-            m_innovationHistory.erase(NodePair{ inNode, thisInfo.m_newNode });
-            m_innovationHistory.erase(NodePair{ thisInfo.m_newNode, outNode });
-
-            assert(CheckSanity(genome));
-        }
-    }
-}
-
-void NEAT::Speciation()
-{
-    for (auto& species : m_generation.m_species)
-    {
-        species.m_scores.clear();
-        if (species.m_stagnantGenerationCount == 0)
-        {
-            species.m_previousBestFitness = species.m_bestScore.m_fitness;
-        }
-        species.m_adjustedTotalScore = 0.f;
-        species.m_bestScore.m_fitness = 0.f;
-        species.m_bestScore.m_adjustedFitness = 0.f;
-    }
-
-    for (size_t i = 0; i < m_config.m_numOrganismsInGeneration; ++i)
-    {
-        Genome& genome = AccessGenome(i);
-        genome.m_species = s_invalidSpeciesId;
-        for (auto& sp : m_generation.m_species)
-        {
-            const auto& representative = sp.m_representative;
-            if (representative.m_connectionGenes.size() > 0)
-            {
-                if (CalculateDistance(genome, representative) < m_config.m_speciationDistThreshold)
-                {
-                    genome.m_species = sp.m_id;
-                    sp.m_scores.push_back(m_scores[i]);
-
-                    if (sp.m_bestScore.m_fitness < m_scores[i].m_fitness)
-                    {
-                        sp.m_bestScore = m_scores[i];
-                    }
-                    break;
-                }
-            }
-        }
-
-        if (genome.m_species == s_invalidSpeciesId)
-        {
-            genome.m_species = m_currentSpeciesId;
-            std::vector<Species>& sp = m_generation.m_species;
-            sp.push_back(Species{ m_currentSpeciesId++ });
-            sp.back().m_scores.push_back(m_scores[i]);
-            sp.back().m_bestScore = m_scores[i];
-            sp.back().m_representative = genome;
-        }
-    }
-
-    for (auto itr = m_generation.m_species.begin(); itr != m_generation.m_species.end();)
-    {
-        auto& species = *itr;
-        if (species.m_scores.size() == 0)
-        {
-            itr = m_generation.m_species.erase(itr);
-            continue;
-        }
-
-        RandomIntDistribution<uint32_t> randomInt(0, species.m_scores.size() - 1);
-        int representativeIndex = species.m_scores[randomInt(s_randomGenerator)].m_index;
-        species.m_representative = GetGenome(representativeIndex);
-
-        bool extinct = false;
-        if (species.m_previousBestFitness >= species.m_bestScore.m_fitness)
-        {
-            ++species.m_stagnantGenerationCount;
-            if (species.m_stagnantGenerationCount >= 15 && m_generation.m_species.size() > 2)
-            {
-                extinct = true;
-            }
-        }
-        else
-        {
-            species.m_stagnantGenerationCount = 0;
-        }
-
-        if (!extinct || !m_config.m_extinctStagnantSpecies)
-        {
-            float denom = 1.0f / (float)species.m_scores.size();
-            for (auto& s : species.m_scores)
-            {
-                s.m_adjustedFitness = s.m_fitness * denom;
-                m_scores[s.m_index].m_adjustedFitness = s.m_adjustedFitness;
-                species.m_adjustedTotalScore += s.m_adjustedFitness;
-            }
-
-            if (species.ShouldProtectBest())
-            {
-                AccessGenome(species.m_bestScore.m_index).m_protect = true;
-            }
-
-            // Sort genomes stored in the species by fitness
-            // This is necessary to remove lowest fitness genomes during selection
-            std::sort(species.m_scores.begin(), species.m_scores.end(), [](const Score& s1, const Score& s2)
-            {
-                return s1.m_fitness > s2.m_fitness;
-            });
-        }
-        else
-        {
-            for (auto& s : species.m_scores)
-            {
-                m_scores[s.m_index].m_fitness = 0.f;
-                m_scores[s.m_index].m_adjustedFitness = 0.f;
-                s.m_fitness = 0.f;
-            }
-            species.m_adjustedTotalScore = 0.f;
-            itr = m_generation.m_species.erase(itr);
-            continue;
-        }
-
-        ++itr;
-    }
-}
-
-// Calculate distance between two genomes based on their topologies and weights
-float NEAT::CalculateDistance(const Genome& genome1, const Genome& genome2) const
-{
-    const auto& cGenes1 = genome1.m_connectionGenes;
-    const auto& cGenes2 = genome2.m_connectionGenes;
-    const size_t numConnectionsP1 = cGenes1.size();
-    const size_t numConnectionsP2 = cGenes2.size();
-    const size_t numConnectionsLarge = numConnectionsP1 > numConnectionsP2 ? numConnectionsP1 : numConnectionsP2;
-    const size_t numConnectionsSmall = numConnectionsP1 > numConnectionsP2 ? numConnectionsP2 : numConnectionsP1;
-    size_t numMismatches = 0;
-    size_t numMatches = 0;
-    float weightDifference = 0.f;
-
-    auto itr1 = cGenes1.begin();
-    auto itr2 = cGenes2.begin();
-
-    while (itr1 != cGenes1.end() && itr2 != cGenes2.end())
-    {
-        const ConnectionGene& cGene1 = itr1->second;
-        const ConnectionGene& cGene2 = itr2->second;
-        if (cGene1.m_innovId == cGene2.m_innovId)
-        {
-            weightDifference += std::fabs((/*cGene1.m_enabled ? */cGene1.m_weight/* : 0.f*/) - (/*cGene2.m_enabled ? */cGene2.m_weight/* : 0.f*/));
-            ++numMatches;
-            ++itr1;
-            ++itr2;
-        }
-        else
-        {
-            ++numMismatches;
-            if (cGene1.m_innovId < cGene2.m_innovId)
-            {
-                ++itr1;
-            }
-            else
-            {
-                ++itr2;
-            }
-        }
-    }
-
-    while (itr1 != cGenes1.end())
-    {
-        ++numMismatches;
-        ++itr1;
-    }
-    while (itr2 != cGenes2.end())
-    {
-        ++numMismatches;
-        ++itr2;
-    }
-
-    if (numMatches == 0)
-    {
-        return std::numeric_limits<float>::max();
-    }
-    else
-    {
-        int n = numConnectionsSmall >= 20 ? numConnectionsLarge : 1;
-        return (float)numMismatches / (float)n + 0.4f * (weightDifference / (float)numMatches);
     }
 }
 
@@ -1631,8 +1507,6 @@ float NEAT::Evaluate(const Genome& genom) const
 // Evaluate value of each node recursively
 void NEAT::EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const
 {
-    assert(m_config.m_allowCyclicNetwork == false);
-
     float val = 0.f;
 
     if (values.find(nodeId) != values.end())
@@ -1695,21 +1569,17 @@ void NEAT::SetupInitialNodeGenes()
 auto NEAT::CreateDefaultInitialGenome() -> Genome
 {
     // Create two input nodes, one output node and two connections with random weight
-
     Genome genomeOut;
-
-    CreateNewNode(NodeGeneType::Input);
 
     NodeGeneId input1 = 0;
     NodeGeneId input2 = 1;
     NodeGeneId output = 2;
-    genomeOut.m_nodeLinks[input1] = Genome::Links();
-    genomeOut.m_nodeLinks[input2] = Genome::Links();
-    genomeOut.m_nodeLinks[output] = Genome::Links();
+    genomeOut.AddNode(input1);
+    genomeOut.AddNode(input2);
+    genomeOut.AddNode(output);
 
-    RandomRealDistribution<float> randomf(-1.f, 1.f);
-    Connect(genomeOut, input1, output, randomf(s_randomGenerator));
-    Connect(genomeOut, input2, output, randomf(s_randomGenerator));
+    Connect(genomeOut, input1, output, GetRandomWeight());
+    Connect(genomeOut, input2, output, GetRandomWeight());
 
     return genomeOut;
 }

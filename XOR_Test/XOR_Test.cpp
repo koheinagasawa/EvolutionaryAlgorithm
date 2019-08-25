@@ -3,11 +3,8 @@
 #include <iostream>
 #include <cmath>
 #include <cassert>
-#include <random>
 #include <cstring>
 #include <sstream>
-
-static std::default_random_engine s_randomGenerator;
 
 class XORNEAT : public NEAT
 {
@@ -103,14 +100,13 @@ int main()
 {
     NEAT::Configration config;
     config.m_useGlobalActivationFunc = true;
-    //config.extinctStagnantSpecies = false;
     config.m_allowCyclicNetwork = false;
     config.m_activateFunctions.push_back([](float f)
     {
         return 1.f / (1.f + exp(-4.9f * f)); 
     });
     config.m_diversityProtection = NEAT::DiversityProtectionMethod::Speciation;
-    config.m_numOrganismsInGeneration = 150;
+    config.m_numGenomesInGeneration = 150;
     XORNEAT neat;
     neat.Initialize(config);
 
@@ -136,14 +132,7 @@ int main()
             serialize(i+1);
             break;
         }
-        //neat.GetNewGeneration(i % 10 == 0);
     }
-
-    //neat.AddNewNode(neat.generation.genomes[0]);
-    //neat.AddNewCoonection(neat.generation.genomes[0]);
-    //neat.AddNewNode(neat.generation.genomes[1]);
-    //neat.AddNewCoonection(neat.generation.genomes[1]);
-    //NEAT::Genome genom = neat.CrossOver(neat.generation.genomes[0], neat.generation.genomes[1], true);
 
     return 0;
 }

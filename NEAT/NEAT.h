@@ -98,7 +98,7 @@ public:
         // List of connection genes sorted by their innovation ids
         ConnectionGeneList m_connectionGenes;
 
-        SpeciesId m_species;
+        SpeciesId m_species = s_invalidSpeciesId;
 
         bool m_protect = false;
     };
@@ -107,7 +107,8 @@ public:
     {
         float m_fitness;
         float m_adjustedFitness;
-        uint32_t m_index;
+        int m_index;
+        inline bool operator< (const Score& rhs) const;
     };
 
     struct Species
@@ -117,12 +118,14 @@ public:
         std::vector<Score> m_scores;
         Score m_bestScore;
         float m_adjustedTotalScore = 0.f;
+        float m_adjustedScoreEliminatedLows = 0.f;
         float m_previousBestFitness = 0.f;
         int m_stagnantGenerationCount = 0;
         
+        inline int GetNumGenomes() const;
+        inline float GetBestFitness() const;
+        inline auto GetBestGenome() const -> NodeGeneId;
         inline bool ShouldProtectBest() const;
-
-        inline bool operator< (const Species& rhs) const;
     };
 
     struct Generation
@@ -130,7 +133,7 @@ public:
         GenerationId m_generationId = 0;
         GenomeList m_genomes = nullptr;
         std::vector<NodeGene> m_nodeGenes;
-        std::vector<Species> m_species;
+        std::vector<Species*> m_species;
     };
 
     enum class DiversityProtectionMethod
@@ -147,25 +150,29 @@ public:
         ActivationFuncId m_defaultActivateFunctionId = 0;
         std::vector<ActivationFunc> m_activateFunctions;
 
-        uint32_t m_numOrganismsInGeneration = 100;
+        int m_numGenomesInGeneration = 100;
 
-        float m_maximumWeight = 1.0f;
-        float m_minimumWeight = -11.0f;
+        float m_maximumWeight = 5.0f;
+        float m_minimumWeight = -5.0f;
 
         float m_weightMutationRate = .8f;
         float m_weightPerturbationRate = .9f;
         float m_weightNewValueRate = .1f;
+        float m_weightPerturbation = 0.05f;
         float m_geneDisablingRate = .75f;
         float m_crossOverRate = .75f;
         float m_interSpeciesMatingRate = .001f;
         float m_nodeAdditionRate = .03f;
         float m_connectionAdditionRate = .05f;
         float m_speciationDistThreshold = 3.0f;
+        float m_weightScaleForDistance = 0.4f;
+        float m_lowerGenomeEliminationRate = 0.2f;
 
         bool m_enableCrossOver = true;
 
         bool m_useGlobalActivationFunc = true;
         bool m_extinctStagnantSpecies = true;
+        int m_numGenerationsToExtinctSpecies = 15;
 
         // Indicates if NEAT allows to generate networks with cyclic connections
         // If false, generated networks are guaranteed to be feed forward
@@ -187,19 +194,6 @@ protected:
         InnovationId m_oldConnection;
         InnovationId m_newConnection1;
         InnovationId m_newConnection2;
-    };
-
-    struct NewlyAddedConnection
-    {
-        Genome& m_genome;
-        InnovationId m_innovId;
-        NodePair m_nodes;
-    };
-
-    struct IncompatibleRegion
-    {
-        std::set<NodeGeneId> m_nodes;
-        std::set<InnovationId> m_connections;
     };
 
     using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NodeAddedInfo>>;
@@ -276,7 +270,10 @@ protected:
     inline auto GetNodeGene(NodeGeneId nodeGeneId) const -> const NodeGene&;
 
     inline float GetRandomWeight() const;
+
     inline float GetRandomProbability() const;
+
+    static inline float GetRandomValue(float max);
 
     bool CheckSanity(const Genome& genome) const;
 
@@ -285,6 +282,7 @@ private:
     inline auto AccessGenome(int index) -> Genome&;
     inline auto GetGenome(int index) const -> const Genome&;
     inline int GetNumGenomes() const;
+    inline int GetNumSpecies() const;
 
     // Add a new node at a random connection in the genome
     auto AddNewNode(Genome& genome)->NodeAddedInfo;
@@ -296,25 +294,40 @@ private:
     // Return false if adding a connection between srcNode to targetNode makes the network cyclic
     bool CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
 
-    // Perform cross over operation over two genomes and generate a new genome
-    auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const->Genome;
-
-    void GetIncompatibleRegionRecursive(NodeGeneId current, const Genome* base, const Genome* other, IncompatibleRegion& incompatible) const;
-
     // Implementation of generating a new generation
     void GenerateNewGeneration(bool printFitness);
 
-    void SelectGenomes();
-
+    // Apply mutation
     void Mutate();
 
     // Make sure that the same topological changes have the same id
     void EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes);
 
+    // Perform speciation
     void Speciation();
 
     // Calculate distance between two genomes based on their topologies and weights
     float CalculateDistance(const Genome& genome1, const Genome& genome2) const;
+
+    // Select genomes to the next generation
+    void SelectGenomes();
+
+    // Get genome and its score to inherit from a species
+    auto GetInheritanceFromSpecies(Species& species, std::vector<Genome>& newGenomes)->Score;
+
+    // Perform cross over operation over two genomes and generate a new genome
+    auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const->Genome;
+
+    // Try to add the given connection to the child genome
+    void TryAddConnection(const ConnectionGene& connection, const Genome* base, const Genome* other, bool enable, Genome& child) const;
+
+    // Try to add a consecutive incompatible region to the child genome as a batch
+    void TryAddIncompatibleRegion(const NodeGeneId incompatibleNode, const Genome* base, const Genome* other, Genome& child) const;
+
+    // Collect connections connected to nodes which exist only in base but not in other
+    void GetIncompatibleRegionRecursive(NodeGeneId current, const Genome* base, const Genome* other, std::set<InnovationId>& incompatibleConnections) const;
+
+    inline auto SelectGenome(float value, const std::vector<Score>& scores) -> const Score&;
 
 public:
 

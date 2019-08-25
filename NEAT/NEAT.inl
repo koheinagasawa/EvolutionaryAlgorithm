@@ -41,9 +41,12 @@ inline void NEAT::Genome::DisableConnection(InnovationId innovId)
 {
     assert(HasConnection(innovId));
     ConnectionGene& c = m_connectionGenes[innovId];
+    if (c.m_enabled)
+    {
+        m_nodeLinks[c.m_inNode].m_numEnabledOutgoings--;
+        m_nodeLinks[c.m_outNode].m_numEnabledIncomings--;
+    }
     c.m_enabled = false;
-    m_nodeLinks[c.m_inNode].m_numEnabledOutgoings--;
-    m_nodeLinks[c.m_outNode].m_numEnabledIncomings--;
 }
 
 inline void NEAT::Genome::AddNode(NodeGeneId nodeId)
@@ -75,18 +78,42 @@ inline auto NEAT::Genome::GetOutgoingConnections(NodeGeneId nodeId) const -> con
 }
 
 //
+// Score
+//
+
+inline bool NEAT::Score::operator< (const Score& rhs) const
+{
+    return m_fitness < rhs.m_fitness;
+}
+
+//
 // Species
 //
 
-inline bool NEAT::Species::ShouldProtectBest() const
+inline int NEAT::Species::GetNumGenomes() const
 {
-    return m_scores.size() >= 3;
+    return (int)m_scores.size();
 }
 
-inline bool NEAT::Species::operator< (const Species& rhs) const
+inline float NEAT::Species::GetBestFitness() const
 {
-    return m_bestScore.m_fitness < rhs.m_bestScore.m_fitness; 
+    return m_bestScore.m_fitness;
 }
+
+inline auto NEAT::Species::GetBestGenome() const->NodeGeneId
+{
+    return m_bestScore.m_index;
+}
+
+inline bool NEAT::Species::ShouldProtectBest() const
+{
+    return GetNumGenomes() >= 5;
+}
+
+//inline bool NEAT::Species::operator< (const Species& rhs) const
+//{
+//    return m_bestScore < rhs.m_bestScore; 
+//}
 
 //
 // NEAT
@@ -110,6 +137,27 @@ inline auto NEAT::GetGenome(int index) const -> const Genome&
 inline int NEAT::GetNumGenomes() const
 {
     return (int)(*m_generation.m_genomes).size();
+}
+
+inline int NEAT::GetNumSpecies() const
+{
+    return (int)m_generation.m_species.size();
+}
+
+inline auto NEAT::SelectGenome(float value, const std::vector<Score>& scores) -> const Score &
+{
+    float currentSum = 0;
+    for (const auto& score : scores)
+    {
+        currentSum += score.m_adjustedFitness;
+        if (currentSum >= value)
+        {
+            return score;
+        }
+    }
+
+    assert(0);
+    return scores.back();
 }
 
 inline auto NEAT::SelectRandomeGenome() -> Genome &
@@ -166,4 +214,9 @@ inline float NEAT::GetRandomWeight() const
 inline float NEAT::GetRandomProbability() const
 {
     return RandomRealDistribution<float>(0.0f, 1.0f)(s_randomGenerator);
+}
+
+inline float NEAT::GetRandomValue(float max)
+{
+    return RandomRealDistribution<float>(0, max)(s_randomGenerator);
 }
