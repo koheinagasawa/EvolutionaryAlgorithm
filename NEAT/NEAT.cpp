@@ -1504,30 +1504,47 @@ float NEAT::Evaluate(const Genome& genom) const
     return 0.0f;
 }
 
-// Evaluate value of each node recursively
-void NEAT::EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const
+// Evaluate value of a node
+float NEAT::EvaluateNode(const Genome& genome, NodeGeneId nodeId, std::unordered_map<NodeGeneId, float>& values) const
 {
-    float val = 0.f;
+    std::vector<NodeGeneId> evaluatingNodes;
+    EvaluateNodeRecursive(genome, nodeId, evaluatingNodes, values);
+    assert(values.find(nodeId) != values.end());
+    return values[nodeId];
+}
 
+// Evaluate value of nodes recursively
+void NEAT::EvaluateNodeRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const
+{
     if (values.find(nodeId) != values.end())
     {
+        // Already evaluated this node
         return;
     }
 
-    for (auto innovId : genome.m_nodeLinks.at(nodeId).m_incomings)
+    float val = 0.f;
+
+    // Evaluate all incoming connections of this node in order to evaluate this node
+    for (auto innovId : genome.GetIncommingConnections(nodeId))
     {
         const auto connectionGene = GetConnectionGene(genome, innovId);
-        assert(connectionGene != nullptr);
+        assert(connectionGene);
 
+        // Ignore disabled connection
         if (!connectionGene->m_enabled) continue;
 
         auto incomingNodeId = connectionGene->m_inNode;
-        bool alreadyEvaluating = false;
 
         if (values.find(incomingNodeId) == values.end())
         {
+            // We've never evaluated this node yet. Evaluate it.
+
+            // Special treatment for cyclic network
             if (m_config.m_allowCyclicNetwork)
             {
+                // Check if we are already evaluating this node
+                // if so, skip calling recursive function to avoid infinite loop
+                bool alreadyEvaluating = false;
                 for (NodeGeneId id : evaluatingNodes)
                 {
                     if (incomingNodeId == id)
@@ -1537,23 +1554,25 @@ void NEAT::EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vecto
                     }
                 }
                 if (alreadyEvaluating) continue;
+
                 evaluatingNodes.push_back(incomingNodeId);
             }
 
-            if (values.find(incomingNodeId) == values.end())
-            {
-                EvaluateRecursive(genome, incomingNodeId, evaluatingNodes, values);
-            }
+            // Evaluate the incoming node
+            EvaluateNodeRecursive(genome, incomingNodeId, evaluatingNodes, values);
 
+            // Remove the incoming node from evaluatingNode buffer
             if (m_config.m_allowCyclicNetwork)
             {
                 evaluatingNodes.resize(evaluatingNodes.size() - 1);
             }
         }
 
+        // Calculate sum from all incoming connection
         val += values[incomingNodeId] * connectionGene->m_weight;
     }
 
+    // Apply activation function and store the result to the result map
     values[nodeId] = m_activationFuncs[m_generation.m_nodeGenes[nodeId].m_activationFuncId](val);
 }
 
@@ -1610,6 +1629,7 @@ bool NEAT::CheckSanity(const Genome& genome) const
         }
     }
 
+    // Check consistency of node links
     {
         for (auto elem : genome.m_nodeLinks)
         {
@@ -1648,12 +1668,15 @@ bool NEAT::CheckSanity(const Genome& genome) const
         }
     }
 
+    // Check there is no dangling hidden nodes
     {
         for (auto elem : genome.m_nodeLinks)
         {
             if (m_generation.m_nodeGenes[elem.first].m_type == NodeGeneType::Hidden)
             {
                 const Genome::Links& links = elem.second;
+                // Hidden nodes must be connected to something in both directions
+                // [TODO]: Verify this condition is reasonable. It's not explicitly stated in the original paper.
                 if (links.m_incomings.size() == 0 || links.m_outgoings.size() == 0)
                 {
                     return false;
@@ -1662,6 +1685,7 @@ bool NEAT::CheckSanity(const Genome& genome) const
         }
     }
 
+    // Check if the network is not cyclic
     if (!m_config.m_allowCyclicNetwork)
     {
         for (const auto con : genome.m_connectionGenes)

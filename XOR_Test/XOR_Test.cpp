@@ -32,9 +32,7 @@ protected:
         values[m_inputNode1] = input1 ? 1.f : 0.f;
         values[m_inputNode2] = input2 ? 1.f : 0.f;
 
-        std::vector<NodeGeneId> evaluatingNodes;
-        EvaluateRecursive(genome, m_outputNode, evaluatingNodes, values);
-        return values[m_outputNode];
+        return EvaluateNode(genome, m_outputNode, values);
     }
 
     virtual
@@ -120,7 +118,7 @@ int main()
 
     for (int i = 0; i < 10000; ++i)
     {
-        if (i > 0 && i % 10 == 0)
+        //if (i > 0 && i % 10 == 0)
         {
             serialize(i);
         }

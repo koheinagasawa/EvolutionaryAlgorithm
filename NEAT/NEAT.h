@@ -242,8 +242,11 @@ protected:
     // Evaluate a genome and return its fitness
     virtual float Evaluate(const Genome& genom) const;
 
+    // Evaluate value of a node
+    float EvaluateNode(const Genome& genome, NodeGeneId nodeId, std::unordered_map<NodeGeneId, float>& values) const;
+
     // Evaluate value of each node recursively
-    void EvaluateRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const;
+    void EvaluateNodeRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const;
 
     // Set up node used for the initial network
     virtual void SetupInitialNodeGenes();

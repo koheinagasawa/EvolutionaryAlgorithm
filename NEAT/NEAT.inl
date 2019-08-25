@@ -110,11 +110,6 @@ inline bool NEAT::Species::ShouldProtectBest() const
     return GetNumGenomes() >= 5;
 }
 
-//inline bool NEAT::Species::operator< (const Species& rhs) const
-//{
-//    return m_bestScore < rhs.m_bestScore; 
-//}
-
 //
 // NEAT
 //
