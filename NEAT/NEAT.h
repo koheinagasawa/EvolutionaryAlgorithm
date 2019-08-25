@@ -89,6 +89,7 @@ public:
         inline void DisableConnection(InnovationId innovId);
         inline void AddNode(NodeGeneId);
         inline int GetNumConnections() const;
+        inline int GetNumEnabledConnections() const;
         inline int GetNumNodes() const;
         inline auto GetIncommingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId>&;
         inline auto GetOutgoingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId>&;
@@ -335,6 +336,9 @@ private:
 public:
 
     Configration m_config;
+
+    // Count the number of evaluation for performance investigation
+    mutable int m_evaluationCount = 0;
 
 protected:
 

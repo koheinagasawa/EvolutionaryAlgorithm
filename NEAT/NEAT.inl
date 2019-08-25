@@ -60,6 +60,16 @@ inline int NEAT::Genome::GetNumConnections() const
     return (int)m_connectionGenes.size();
 }
 
+inline int NEAT::Genome::GetNumEnabledConnections() const
+{
+    int result = 0;
+    for (auto elem : m_connectionGenes)
+    {
+        if (elem.second.m_enabled) ++result;
+    }
+    return result;
+}
+
 inline int NEAT::Genome::GetNumNodes() const
 {
     return (int)m_nodeLinks.size();

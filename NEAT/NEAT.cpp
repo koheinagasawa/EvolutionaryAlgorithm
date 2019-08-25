@@ -6,9 +6,10 @@
 #include <fstream>
 #include <iostream>
 
-std::default_random_engine NEAT::s_randomGenerator(3);
+std::default_random_engine NEAT::s_randomGenerator;
 
 #define TEST_PREVENT_TO_ADD_NEW_CONNECTION_TO_DEADEND_HIDDEN_NODE 1
+#define TEST_PROTECT_NEWLY_CREATED_GENOME_BY_CROSS_OVER 1
 
 // Initialize NEAT
 // This has to be called before gaining any generations
@@ -83,12 +84,16 @@ void NEAT::Reset()
         }
     }
 
+    m_innovationHistory.clear();
+
     // Reset global ids
     m_currentInnovationId = 0;
     m_currentSpeciesId = 0;
 
     // Allocate memory for scores
     m_scores.resize(m_config.m_numGenomesInGeneration);
+
+    m_evaluationCount = 0;
 }
 
 // Gain the new generation
@@ -110,27 +115,24 @@ auto NEAT::GetCurrentGeneration() -> const Generation&
 // Print fitness of each genome in the current generation
 void NEAT::PrintFitness() const
 {
-    std::cout << "\nGeneration " << m_generation.m_generationId << std::endl;
-    float sum = 0;
-    const int population = GetNumGenomes();
+    float sumFitness = 0;
     float maxFitness = 0;
     int bestGenomeId = -1;
-    int bestSpeciesId = -1;
 
-    for (int i = 0; i < population; ++i)
+    for (int i = 0; i < GetNumGenomes(); ++i)
     {
         const Genome& genome = GetGenome(i);
         const float fitness = Evaluate(genome);
 
-        sum += fitness;
+        sumFitness += fitness;
         if (fitness > maxFitness)
         {
             maxFitness = fitness;
             bestGenomeId = i;
-            bestSpeciesId = genome.m_species;
         }
     }
 
+    const int bestSpeciesId = GetGenome(0).m_species;
     const Species* bestSpecies = nullptr;
     for (const auto& sp : m_generation.m_species)
     {
@@ -141,11 +143,15 @@ void NEAT::PrintFitness() const
         }
     }
 
-
-    std::cout << "Average fitness over " << population << " organisms: " << sum / (float)population << std::endl;
+    std::cout << "======================" << std::endl;
+    std::cout << "Generation " << m_generation.m_generationId << std::endl;
+    std::cout << "Average fitness among " << GetNumGenomes() << " genomes : " << sumFitness / (float)GetNumGenomes() << std::endl;
     std::cout << "Maximum fitness: Species " << bestSpeciesId << ": Genome " << bestGenomeId << " - Score: " << maxFitness << std::endl;
     std::cout << "Number of species: " << m_generation.m_species.size() << std::endl;
-    std::cout << "Number of genomes in the best species: " << bestSpecies->m_scores.size() << std::endl;
+    if (bestSpecies)
+    {
+        std::cout << "Number of genomes in the best species: " << bestSpecies->m_scores.size() << std::endl;
+    }
 }
 
 // Serialize generation as a json file
@@ -1138,6 +1144,7 @@ void NEAT::SelectGenomes()
             GetGenome(g2->m_index),
             g2->m_fitness));
 
+#if TEST_PROTECT_NEWLY_CREATED_GENOME_BY_CROSS_OVER
         Genome& newGenome = newGenomes.back();
 
         const float fitness = Evaluate(newGenome);
@@ -1148,7 +1155,9 @@ void NEAT::SelectGenomes()
         {
             newGenome.m_protect = true;
         }
-
+#else
+        const float fitness = 0.f;
+#endif
         // We will use m_adjustedFitness == -1 later to indicate that this genome has newly generated
         genomesToInherit.push_back(Score{ fitness, -1.f, (int)newGenomes.size() - 1 });
     }
@@ -1166,6 +1175,7 @@ void NEAT::SelectGenomes()
     }
 
 #ifdef _DEBUG
+    if(m_config.m_enableSanityCheck)
     {
         // Clear genome indices stored in species
         for (Species* s : m_generation.m_species)
@@ -1230,6 +1240,7 @@ auto NEAT::GetInheritanceFromSpecies(Species& sp, std::vector<Genome>& newGenome
     Genome& newGenome = newGenomes.back();
     newGenome.m_species = sp.m_id;
 
+#if TEST_PROTECT_NEWLY_CREATED_GENOME_BY_CROSS_OVER
     // Evaluate fitness of the new genome
     const float fitness = Evaluate(newGenome);
 
@@ -1250,6 +1261,9 @@ auto NEAT::GetInheritanceFromSpecies(Species& sp, std::vector<Genome>& newGenome
             // So updating just fitness should be sufficient.
         }
     }
+#else
+    const float fitness = 0.f;
+#endif
 
     // We will use m_adjustedFitness == -1 later to indicate that this genome has newly generated
     return Score{ fitness, -1.f, (int)newGenomes.size() - 1 };
@@ -1496,6 +1510,8 @@ void NEAT::GetIncompatibleRegionRecursive(NodeGeneId current, const Genome* base
 // Evaluate a genome and return its fitness
 float NEAT::Evaluate(const Genome& genom) const
 {
+    ++m_evaluationCount;
+
     if (m_fitnessFunc)
     {
         return m_fitnessFunc(genom);

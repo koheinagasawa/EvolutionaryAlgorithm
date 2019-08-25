@@ -5,8 +5,16 @@
 #include <cassert>
 #include <cstring>
 #include <sstream>
+#include <fstream>
 
-class XORNEAT : public NEAT
+#include <filesystem>
+#if __cplusplus < 201703L
+namespace fs = std::experimental::filesystem;
+#else
+namespace fs = std::filesystem;
+#endif
+
+class XorNEAT : public NEAT
 {
 public:
 
@@ -38,6 +46,8 @@ protected:
     virtual
     float Evaluate(const Genome& genome) const override
     {
+        ++m_evaluationCount;
+
         float score = 0.f;
 
         // Test 4 patterns of XOR
@@ -69,19 +79,14 @@ protected:
 
         Genome genomeOut;
 
-        NodeGeneId input1 = 0;
-        NodeGeneId input2 = 1;
-        NodeGeneId bias = 2;
-        NodeGeneId output = 3;
+        genomeOut.AddNode(m_inputNode1);
+        genomeOut.AddNode(m_inputNode2);
+        genomeOut.AddNode(m_biasNode);
+        genomeOut.AddNode(m_outputNode);
 
-        genomeOut.AddNode(input1);
-        genomeOut.AddNode(input2);
-        genomeOut.AddNode(bias);
-        genomeOut.AddNode(output);
-
-        Connect(genomeOut, input1, output, GetRandomWeight());
-        Connect(genomeOut, input2, output, GetRandomWeight());
-        Connect(genomeOut, bias, output, GetRandomWeight());
+        Connect(genomeOut, m_inputNode1, m_outputNode, GetRandomWeight());
+        Connect(genomeOut, m_inputNode2, m_outputNode, GetRandomWeight());
+        Connect(genomeOut, m_biasNode, m_outputNode, GetRandomWeight());
 
         return genomeOut;
     }
@@ -96,6 +101,7 @@ private:
 
 int main()
 {
+    // Configuring NEAT
     NEAT::Configration config;
     config.m_useGlobalActivationFunc = true;
     config.m_allowCyclicNetwork = false;
@@ -105,32 +111,110 @@ int main()
     });
     config.m_diversityProtection = NEAT::DiversityProtectionMethod::Speciation;
     config.m_numGenomesInGeneration = 150;
-    XORNEAT neat;
-    neat.Initialize(config);
+    config.m_enableSanityCheck = false;
 
-    std::string baseOutputDir = "Test/";
-    auto serialize = [baseOutputDir, &neat](int i)
+    // Create NEAT
+    XorNEAT neat;
+
+    // Serialize option
+    bool serializeAll = false;
+    int serializationInterval = 5;
+    auto serializeGeneration = [&neat](std::string baseOutputDir, int i)
     {
         std::stringstream ss;
         ss << baseOutputDir << "Gen" << i << ".json";
         neat.SerializeGeneration(ss.str().c_str());
     };
 
-    for (int i = 0; i < 10000; ++i)
+    // Variables for performance investigation
+    const int maxGeneration = 100;
+    const int numRun = 100;
+    int numFailed = 0;
+    int totalGenerations = 0;
+    int worstGenerations = 0;
+    int totalNumHiddenNodes = 0;
+    int totalNumNondisabledConnections = 0;
+    int totalEvaluationCount = 0;
+    int worstEvaluationCount = 0;
+
+    for (int run = 0; run < numRun; ++run)
     {
-        //if (i > 0 && i % 10 == 0)
+        std::cout << "Starting Run" << run << "..." << std::endl;
+
+        neat.Initialize(config);
+
+        std::string genomesOutputDir;
+        if(serializeAll)
         {
-            serialize(i);
+            std::stringstream ss;
+            ss << "Run" << run << "/";
+            genomesOutputDir = ss.str();
+            fs::create_directories(genomesOutputDir);
         }
 
-        const NEAT::Generation g = neat.GetNewGeneration(true);
-        if (neat.Test((*g.m_genomes)[0]))
+        int generation = 0;
+        for (int i = 0; generation < maxGeneration; ++generation)
         {
-            std::cout << "Solution Found at Generation " << i + 1 << "!" << std::endl;
-            serialize(i+1);
-            break;
+            if (serializeAll && i % serializationInterval == 0)
+            {
+                serializeGeneration(genomesOutputDir, generation);
+            }
+
+            const NEAT::Generation g = neat.GetNewGeneration(false);
+            const NEAT::Genome& bestGenome = (*g.m_genomes)[0];
+            if (neat.Test(bestGenome))
+            {
+                const int numGeneration = neat.GetCurrentGeneration().m_generationId;
+
+                std::cout << "Solution Found at Generation " << numGeneration << "!" << std::endl;
+
+                if (serializeAll)
+                {
+                    serializeGeneration(genomesOutputDir, numGeneration);
+                }
+
+                // Get data for performance investigation
+                totalGenerations += numGeneration;
+                if (worstGenerations < numGeneration)
+                {
+                    worstGenerations = numGeneration;
+                }
+                totalNumHiddenNodes += bestGenome.GetNumNodes() - 4; // 4 is two inputs, one output and out bias
+                totalNumNondisabledConnections += bestGenome.GetNumEnabledConnections();
+                if (worstEvaluationCount < neat.m_evaluationCount)
+                {
+                    worstEvaluationCount = neat.m_evaluationCount;
+                }
+                totalEvaluationCount += neat.m_evaluationCount;
+
+                break;
+            }
+        }
+
+        if (generation == maxGeneration)
+        {
+            std::cout << "Failed!" << std::endl;
+            ++numFailed;
         }
     }
+
+    const float invNumSuccess = 1.0f / float(numRun - numFailed);
+
+    // Output result
+    std::stringstream ss;
+    ss << "=============================" << std::endl;
+    ss << "Average successful generation : " << totalGenerations * invNumSuccess << std::endl;
+    ss << "Worst successful generation : " << worstGenerations << std::endl;
+    ss << "Number of failed run : " << numFailed << std::endl;
+    ss << "Average number of hidden nodes of solution genome : " << totalNumHiddenNodes * invNumSuccess << std::endl;
+    ss << "Average number of non-disabled connections of solution genome : " << totalNumNondisabledConnections * invNumSuccess << std::endl;
+    ss << "Average evaluation count : " << totalEvaluationCount * invNumSuccess << std::endl;
+    ss << "Worst evaluation count : " << worstEvaluationCount << std::endl;
+    ss << "=============================" << std::endl;
+    std::cout << ss.str();
+    std::ofstream ofs("result.txt");
+    ofs << ss.str();
+    ofs.close();
 
     return 0;
 }
