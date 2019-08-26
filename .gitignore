@@ -266,3 +266,5 @@ Bin/
 *.sln
 *.vcxproj
 *.vcxproj.filters
+*.png
+*/Gen*.json
