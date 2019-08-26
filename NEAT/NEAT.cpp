@@ -339,11 +339,11 @@ auto NEAT::CreateNewNode(NodeGeneType type) -> NodeGeneId
     else
     {
         // Set a random activation function
-        RandomIntDistribution<uint32_t> distribution(0, m_activationFuncs.size());
+        RandomIntDistribution<uint32_t> distribution(0, (int)m_activationFuncs.size());
         node.m_activationFuncId = distribution(s_randomGenerator);
     }
 
-    NodeGeneId nodeGeneId = m_generation.m_nodeGenes.size();
+    NodeGeneId nodeGeneId = (int)m_generation.m_nodeGenes.size();
     m_generation.m_nodeGenes.push_back(node);
 
     return nodeGeneId;
@@ -889,7 +889,7 @@ void NEAT::Speciation()
 
         // Select a random representative of this species
         {
-            RandomIntDistribution<uint32_t> randomInt(0, species->m_scores.size() - 1);
+            RandomIntDistribution<uint32_t> randomInt(0, (int)species->m_scores.size() - 1);
             int representativeIndex = species->m_scores[randomInt(s_randomGenerator)].m_index;
             species->m_representative = GetGenome(representativeIndex);
         }

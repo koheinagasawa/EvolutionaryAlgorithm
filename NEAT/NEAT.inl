@@ -173,25 +173,25 @@ inline auto NEAT::SelectRandomeGenome() -> Genome &
 
 inline auto NEAT::SelectRandomNodeGene(const std::vector<NodeGeneId>& genes) const -> NodeGeneId
 {
-    RandomIntDistribution<NodeGeneId> distribution(0, genes.size() - 1);
+    RandomIntDistribution<NodeGeneId> distribution(0, (int)genes.size() - 1);
     return genes[distribution(s_randomGenerator)];
 }
 
 inline auto NEAT::SelectRandomNodeGene(const Genome& genome) const -> NodeGeneId
 {
-    RandomIntDistribution<NodeGeneId> distribution(0, genome.m_nodeLinks.size() - 1);
+    RandomIntDistribution<NodeGeneId> distribution(0, (int)genome.m_nodeLinks.size() - 1);
     return std::next(std::begin(genome.m_nodeLinks), distribution(s_randomGenerator))->first;
 }
 
 inline auto NEAT::SelectRandomConnectionGene(const std::vector<InnovationId>& genes) const -> InnovationId
 {
-    RandomIntDistribution<InnovationId> distribution(0, genes.size() - 1);
+    RandomIntDistribution<InnovationId> distribution(0, (int)genes.size() - 1);
     return *std::next(std::begin(genes), distribution(s_randomGenerator));
 }
 
 inline auto NEAT::SelectRandomConnectionGene(const Genome& genome) const -> InnovationId
 {
-    RandomIntDistribution<InnovationId> distribution(0, genome.m_connectionGenes.size() - 1);
+    RandomIntDistribution<InnovationId> distribution(0, (int)genome.m_connectionGenes.size() - 1);
     return std::next(std::begin(genome.m_connectionGenes), distribution(s_randomGenerator))->second.m_innovId;
 }
 
