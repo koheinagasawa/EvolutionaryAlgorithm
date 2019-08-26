@@ -15,7 +15,7 @@ def CreateGraphsForBestGenomes(path, runIndex):
 dir = "XOR_Test/Results"
 
 # Create graphs of all genomes in a generation of a run
-CreateGraphsForGeneration(dir, 9, 58)
+CreateGraphsForGeneration(dir, 9, 50)
 
 # Create graphs of all the best genomes throughout generations of a run
 # numRun = 20
