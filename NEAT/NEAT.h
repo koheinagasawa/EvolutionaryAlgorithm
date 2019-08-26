@@ -153,33 +153,36 @@ public:
 
         int m_numGenomesInGeneration = 100;
 
-        float m_maximumWeight = 5.0f;
-        float m_minimumWeight = -5.0f;
-
+        float m_maximumWeight = 10.0f;
+        float m_minimumWeight = -10.0f;
         float m_weightMutationRate = .8f;
         float m_weightPerturbationRate = .9f;
         float m_weightNewValueRate = .1f;
         float m_weightPerturbation = 0.05f;
-        float m_geneDisablingRate = .75f;
-        float m_crossOverRate = .75f;
-        float m_interSpeciesMatingRate = .001f;
+
         float m_nodeAdditionRate = .03f;
         float m_connectionAdditionRate = .05f;
-        float m_speciationDistThreshold = 3.0f;
-        float m_weightScaleForDistance = 0.4f;
-        float m_lowerGenomeEliminationRate = 0.2f;
 
         bool m_enableCrossOver = true;
+        float m_crossOverRate = .75f;
+        float m_geneDisablingRate = .75f;
+        float m_interSpeciesMatingRate = .001f;
 
-        bool m_useGlobalActivationFunc = true;
+        float m_lowerGenomeEliminationRate = 0.4f;
+
+        DiversityProtectionMethod m_diversityProtection = DiversityProtectionMethod::Speciation;
+
+        float m_speciationDistThreshold = 3.0f;
+        float m_weightScaleForDistance = 0.4f;
+
         bool m_extinctStagnantSpecies = true;
         int m_numGenerationsToExtinctSpecies = 15;
 
+        bool m_useGlobalActivationFunc = true;
+
         // Indicates if NEAT allows to generate networks with cyclic connections
         // If false, generated networks are guaranteed to be feed forward
-        bool m_allowCyclicNetwork = true;
-
-        DiversityProtectionMethod m_diversityProtection = DiversityProtectionMethod::Speciation;
+        bool m_allowCyclicNetwork = false;
 
         bool m_enableSanityCheck = true;
     };

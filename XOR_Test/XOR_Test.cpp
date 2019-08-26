@@ -1,12 +1,11 @@
 #include "../NEAT/NEAT.h"
 
-#include <iostream>
 #include <cmath>
 #include <cassert>
 #include <cstring>
+#include <iostream>
 #include <sstream>
 #include <fstream>
-
 #include <filesystem>
 #if __cplusplus < 201703L
 namespace fs = std::experimental::filesystem;
@@ -63,12 +62,12 @@ protected:
     // Set up node used for the initial network
     virtual void SetupInitialNodeGenes() override
     {
-        // There are three input nodes (two for XOR inputs and one for bias)
+        // There are three input nodes (two for XOR inputs and one for bias),
         // no hidden node and one output node
-        CreateNewNode(NodeGeneType::Input);
-        CreateNewNode(NodeGeneType::Input);
-        CreateNewNode(NodeGeneType::Bias);
-        CreateNewNode(NodeGeneType::Output);
+        m_inputNode1 = CreateNewNode(NodeGeneType::Input);
+        m_inputNode2 = CreateNewNode(NodeGeneType::Input);
+        m_biasNode   = CreateNewNode(NodeGeneType::Bias);
+        m_outputNode = CreateNewNode(NodeGeneType::Output);
     }
 
     // Create default genome for the initial generation
@@ -93,10 +92,10 @@ protected:
 
 private:
 
-    static const NodeGeneId m_inputNode1 = 0;
-    static const NodeGeneId m_inputNode2 = 1;
-    static const NodeGeneId m_biasNode   = 2;
-    static const NodeGeneId m_outputNode = 3;
+    NodeGeneId m_inputNode1;
+    NodeGeneId m_inputNode2;
+    NodeGeneId m_biasNode;
+    NodeGeneId m_outputNode;
 };
 
 int main()
@@ -104,7 +103,6 @@ int main()
     // Configuring NEAT
     NEAT::Configration config;
     config.m_useGlobalActivationFunc = true;
-    config.m_allowCyclicNetwork = false;
     config.m_activateFunctions.push_back([](float f)
     {
         return 1.f / (1.f + exp(-4.9f * f)); 
@@ -117,8 +115,8 @@ int main()
     XorNEAT neat;
 
     // Serialize option
-    bool serializeAll = false;
-    int serializationInterval = 5;
+    bool serializeGenomes = true;
+    int serializationGenerationInterval = 5;
     auto serializeGeneration = [&neat](std::string baseOutputDir, int i)
     {
         std::stringstream ss;
@@ -128,7 +126,7 @@ int main()
 
     // Variables for performance investigation
     const int maxGeneration = 100;
-    const int numRun = 100;
+    const int numRun = 10;
     int numFailed = 0;
     int totalGenerations = 0;
     int worstGenerations = 0;
@@ -144,31 +142,26 @@ int main()
         neat.Initialize(config);
 
         std::string genomesOutputDir;
-        if(serializeAll)
+        if(serializeGenomes)
         {
             std::stringstream ss;
-            ss << "Run" << run << "/";
+            ss << "Results/Run" << run << "/";
             genomesOutputDir = ss.str();
             fs::create_directories(genomesOutputDir);
         }
 
-        int generation = 0;
-        for (int i = 0; generation < maxGeneration; ++generation)
+        int i = 0;
+        for (; i < maxGeneration; ++i)
         {
-            if (serializeAll && i % serializationInterval == 0)
-            {
-                serializeGeneration(genomesOutputDir, generation);
-            }
+            const NEAT::Generation& g = neat.GetNewGeneration(false);
+            const int numGeneration = g.m_generationId;
 
-            const NEAT::Generation g = neat.GetNewGeneration(false);
             const NEAT::Genome& bestGenome = (*g.m_genomes)[0];
             if (neat.Test(bestGenome))
             {
-                const int numGeneration = neat.GetCurrentGeneration().m_generationId;
-
                 std::cout << "Solution Found at Generation " << numGeneration << "!" << std::endl;
 
-                if (serializeAll)
+                if (serializeGenomes)
                 {
                     serializeGeneration(genomesOutputDir, numGeneration);
                 }
@@ -179,7 +172,7 @@ int main()
                 {
                     worstGenerations = numGeneration;
                 }
-                totalNumHiddenNodes += bestGenome.GetNumNodes() - 4; // 4 is two inputs, one output and out bias
+                totalNumHiddenNodes += bestGenome.GetNumNodes() - 4; // 4 is two inputs, one output and one bias
                 totalNumNondisabledConnections += bestGenome.GetNumEnabledConnections();
                 if (worstEvaluationCount < neat.m_evaluationCount)
                 {
@@ -189,9 +182,14 @@ int main()
 
                 break;
             }
+
+            if (serializeGenomes && numGeneration % serializationGenerationInterval == 0)
+            {
+                serializeGeneration(genomesOutputDir, numGeneration);
+            }
         }
 
-        if (generation == maxGeneration)
+        if (i == maxGeneration)
         {
             std::cout << "Failed!" << std::endl;
             ++numFailed;
