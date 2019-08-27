@@ -946,6 +946,23 @@ void NEAT::Speciation()
         std::sort(species->m_scores.rbegin(), species->m_scores.rend());
     }
 
+    // If the entire population hasn't been progressing for a certain number of generations,
+    // extinct all species except the top two
+    if (m_generation.m_prevBestFitness >= m_generation.m_species[0]->GetBestFitness())
+    {
+        ++m_generation.m_stagnantGenerationCount;
+        if (m_generation.m_stagnantGenerationCount >= m_config.m_numGenerationsToExtinctMostSpecies)
+        {
+            numSpeciesToDelete = GetNumSpecies() - 2;
+            m_generation.m_stagnantGenerationCount = 0;
+        }
+    }
+    else
+    {
+        m_generation.m_prevBestFitness = m_generation.m_species[0]->GetBestFitness();
+        m_generation.m_stagnantGenerationCount = 0;
+    }
+
     // Sort species in descending order
     std::sort(m_generation.m_species.begin(), m_generation.m_species.end(), [](const Species* s1, const Species* s2)
     {

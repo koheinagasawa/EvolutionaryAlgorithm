@@ -135,6 +135,8 @@ public:
         GenomeList m_genomes = nullptr;
         std::vector<NodeGene> m_nodeGenes;
         std::vector<Species*> m_species;
+        float m_prevBestFitness = 0.0f;
+        int m_stagnantGenerationCount = 0;
     };
 
     enum class DiversityProtectionMethod
@@ -177,6 +179,7 @@ public:
 
         bool m_extinctStagnantSpecies = true;
         int m_numGenerationsToExtinctSpecies = 15;
+        int m_numGenerationsToExtinctMostSpecies = 20;
 
         bool m_useGlobalActivationFunc = true;
 
