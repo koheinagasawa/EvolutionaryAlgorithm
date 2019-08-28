@@ -12,10 +12,10 @@ def CreateGraphsForBestGenomes(path, runIndex):
         if ".json" in i:
             OutputGenomes(dirName + i, 1, True, False, dirName + "BestGenomes/")
 
-dir = "XOR_Test/Results"
+dir = "Test/NEAT_XOR_Test/Results"
 
 # Create graphs of all genomes in a generation of a run
-CreateGraphsForGeneration(dir, 9, 50)
+CreateGraphsForGeneration(dir, 9, 30)
 
 # Create graphs of all the best genomes throughout generations of a run
 # numRun = 20

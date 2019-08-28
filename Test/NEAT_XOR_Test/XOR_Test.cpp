@@ -71,7 +71,7 @@ protected:
     }
 
     // Create default genome for the initial generation
-    virtual auto CreateDefaultInitialGenome() -> Genome override
+    virtual auto CreateDefaultInitialGenome(bool noConnections) -> Genome override
     {
         // Create three input nodes (one of them is a bias), one output node 
         // and three connections with random weights
@@ -83,9 +83,12 @@ protected:
         genomeOut.AddNode(m_biasNode);
         genomeOut.AddNode(m_outputNode);
 
-        Connect(genomeOut, m_inputNode1, m_outputNode, GetRandomWeight());
-        Connect(genomeOut, m_inputNode2, m_outputNode, GetRandomWeight());
-        Connect(genomeOut, m_biasNode, m_outputNode, GetRandomWeight());
+        if (!noConnections)
+        {
+            Connect(genomeOut, m_inputNode1, m_outputNode, GetRandomWeight());
+            Connect(genomeOut, m_inputNode2, m_outputNode, GetRandomWeight());
+            Connect(genomeOut, m_biasNode, m_outputNode, GetRandomWeight());
+        }
 
         return genomeOut;
     }
@@ -109,14 +112,15 @@ int main()
     });
     config.m_diversityProtection = NEAT::DiversityProtectionMethod::Speciation;
     config.m_numGenomesInGeneration = 150;
+    config.m_allowCyclicNetwork = true;
     config.m_enableSanityCheck = false;
 
     // Create NEAT
     XorNEAT neat;
 
     // Serialize option
-    bool serializeGenomes = false;
-    int serializationGenerationInterval = 5;
+    bool serializeGenomes = true;
+    int serializationGenerationInterval = 10;
     auto serializeGeneration = [&neat](std::string baseOutputDir, int i)
     {
         std::stringstream ss;
@@ -126,7 +130,7 @@ int main()
 
     // Variables for performance investigation
     const int maxGeneration = 100;
-    const int numRun = 10;
+    const int numRun = 100;
     int numFailed = 0;
     int totalGenerations = 0;
     int worstGenerations = 0;

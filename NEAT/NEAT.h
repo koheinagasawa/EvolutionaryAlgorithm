@@ -164,6 +164,8 @@ public:
 
         float m_nodeAdditionRate = .03f;
         float m_connectionAdditionRate = .05f;
+        bool m_removeConnectionsByMutation = false;
+        float m_connectionRemovalRate = .005f;
 
         bool m_enableCrossOver = true;
         float m_crossOverRate = .75f;
@@ -179,13 +181,14 @@ public:
 
         bool m_extinctStagnantSpecies = true;
         int m_numGenerationsToExtinctSpecies = 15;
+        bool m_extinctWholeGeneration = true;
         int m_numGenerationsToExtinctMostSpecies = 20;
 
         bool m_useGlobalActivationFunc = true;
 
         // Indicates if NEAT allows to generate networks with cyclic connections
         // If false, generated networks are guaranteed to be feed forward
-        bool m_allowCyclicNetwork = false;
+        bool m_allowCyclicNetwork = true;
 
         bool m_enableSanityCheck = true;
     };
@@ -259,7 +262,7 @@ protected:
     virtual void SetupInitialNodeGenes();
 
     // Create default genome for the initial generation
-    virtual auto CreateDefaultInitialGenome()->Genome;
+    virtual auto CreateDefaultInitialGenome(bool noConnections)->Genome;
 
     //void RemoveStaleGenes();
 
@@ -299,7 +302,12 @@ private:
 
     // Add a new connection between random two nodes in the genome allowing cyclic network
     // If allowCyclic, direction of the new connection is guaranteed to be forward (distance from the input layer to in-node is smaller than the one for out-node)
-    void AddNewConnection(Genome& genome, bool allowCyclic);
+    void AddNewConnection(Genome& genome);
+
+    // Remove one connection from genome
+    // If the removal leads a connected node isolated (connected to nothing), remove such node as well
+    void RemoveConnection(Genome& genome) const;
+    void RemoveConnection(Genome& genome, InnovationId connection) const;
 
     // Return false if adding a connection between srcNode to targetNode makes the network cyclic
     bool CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
@@ -326,7 +334,7 @@ private:
     auto GetInheritanceFromSpecies(Species& species, std::vector<Genome>& newGenomes)->Score;
 
     // Perform cross over operation over two genomes and generate a new genome
-    auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const->Genome;
+    auto CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) -> Genome;
 
     // Try to add the given connection to the child genome
     void TryAddConnection(const ConnectionGene& connection, const Genome* base, const Genome* other, bool enable, Genome& child) const;

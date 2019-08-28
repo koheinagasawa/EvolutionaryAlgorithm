@@ -46,7 +46,7 @@ auto NEAT::Initialize(const Configration& configIn) -> const Generation &
     // Populate the first generation with default genomes
     for (int i = 0; i < m_config.m_numGenomesInGeneration; ++i)
     {
-        AccessGenome(i) = CreateDefaultInitialGenome();
+        AccessGenome(i) = CreateDefaultInitialGenome(false);
     }
 
     m_isInitialized = true;
@@ -457,7 +457,7 @@ auto NEAT::Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float 
 // Add a new connection between random two nodes without allowing cyclic network
 // If allowCyclic is false, direction of the new connection is guaranteed to be one direction 
 // (distance from in node to an input node is smaller than the one of out node)
-void NEAT::AddNewConnection(Genome& genome, bool allowCyclic)
+void NEAT::AddNewConnection(Genome& genome)
 {
     const size_t numNodes = genome.GetNumNodes();
 
@@ -483,7 +483,7 @@ void NEAT::AddNewConnection(Genome& genome, bool allowCyclic)
 #endif
 
                 // Check a rare case that the node is already connected to all the existing node
-                if (genome.m_nodeLinks.at(nodeId).m_incomings.size() < numNodes)
+                if (genome.GetIncommingConnections(nodeId).size() < numNodes)
                 {
                     outNodeCandidates.push_back(nodeId);
                 }
@@ -506,17 +506,14 @@ void NEAT::AddNewConnection(Genome& genome, bool allowCyclic)
         // Then collect all node genes which are not connected to the outNode already
         std::vector<NodeGeneId> inNodeCandidates;
         {
-            // TODO: This bit array could be way bigger than necessary. Replace it with a better solution.
-            std::vector<int> connectedFlag;
-            connectedFlag.resize(((int)m_generation.m_nodeGenes.size() / sizeof(int)) + 1, 0);
+            std::set<NodeGeneId> alreadyConnectedNodes;
 
             // Mark nodes connected to outNode
             for (auto innovId : genome.GetIncommingConnections(outNodeId))
             {
                 const ConnectionGene* cgene = GetConnectionGene(genome, innovId);
                 assert(cgene);
-                const NodeGeneId nodeId = cgene->m_inNode;
-                connectedFlag[nodeId / sizeof(int)] |= (1 << (nodeId % sizeof(int)));
+                alreadyConnectedNodes.insert(cgene->m_inNode);
             }
 
             // Find all nodes not connected to outNode
@@ -525,7 +522,7 @@ void NEAT::AddNewConnection(Genome& genome, bool allowCyclic)
                 const NodeGeneId nodeId = elem.first;
                 const NodeGene& node = GetNodeGene(nodeId);
 
-                if (nodeId == outNodeId) continue;
+                if (!m_config.m_allowCyclicNetwork && nodeId == outNodeId) continue;
 
                 // We can create a new connection leading from either input, bias and hidden nodes
                 if (node.m_type == NodeGeneType::Input ||
@@ -542,10 +539,10 @@ void NEAT::AddNewConnection(Genome& genome, bool allowCyclic)
 #endif
 
                     // Check if the node is already connected to the out node
-                    if (((connectedFlag[nodeId / sizeof(int)] >> (nodeId % sizeof(int))) & 1) == 0)
+                    if (alreadyConnectedNodes.find(nodeId) == alreadyConnectedNodes.end())
                     {
                         // Check cyclic network
-                        if (allowCyclic || CanAddConnectionWithoutCyclic(genome, nodeId, outNodeId))
+                        if (m_config.m_allowCyclicNetwork || CanAddConnectionWithoutCyclic(genome, nodeId, outNodeId))
                         {
                             inNodeCandidates.push_back(nodeId);
                         }
@@ -574,6 +571,85 @@ void NEAT::AddNewConnection(Genome& genome, bool allowCyclic)
 
     // No available nodes were found
     // TODO: Output some useful message
+}
+
+// Remove one connection from genome
+// If the removal leads a connected node isolated (connected to nothing), remove such node as well
+void NEAT::RemoveConnection(Genome& genome) const
+{
+    // Create an array of connections
+    std::vector<InnovationId> connections;
+    {
+        connections.reserve(genome.GetNumConnections());
+        for (const auto& elem : genome.m_connectionGenes)
+        {
+            connections.push_back(elem.first);
+        }
+    }
+
+    // Select a random connection
+    if (connections.size() > 0)
+    {
+        const InnovationId innovId = SelectRandomConnectionGene(connections);
+        RemoveConnection(genome, innovId);
+    }
+}
+
+void NEAT::RemoveConnection(Genome& genome, InnovationId innovId) const
+{
+    const ConnectionGene* connection = GetConnectionGene(genome, innovId);
+    assert(connection);
+    const NodeGeneId inNode = connection->m_inNode;
+    const NodeGeneId outNode = connection->m_outNode;
+    const bool enabled = connection->m_enabled;
+
+    // Remove the connection
+    genome.m_connectionGenes.erase(innovId);
+
+    // Update node links
+    {
+        Genome::Links& links = genome.m_nodeLinks[outNode];
+        std::vector<InnovationId>& incomings = links.m_incomings;
+        for (auto itr = incomings.begin(); itr != incomings.end(); ++itr)
+        {
+            if (*itr == innovId)
+            {
+                incomings.erase(itr);
+                if (enabled) --links.m_numEnabledIncomings;
+                break;
+            }
+        }
+    }
+    {
+        Genome::Links& links = genome.m_nodeLinks[inNode];
+        std::vector<InnovationId>& outgoings = links.m_outgoings;
+        for (auto itr = outgoings.begin(); itr != outgoings.end(); ++itr)
+        {
+            if (*itr == innovId)
+            {
+                outgoings.erase(itr);
+                if (enabled) --links.m_numEnabledOutgoings;
+                break;
+            }
+        }
+    }
+
+    // If the connected node became completely isolated, delete them too
+    auto RemoveNode = [&genome, this](NodeGeneId node)
+    {
+        if (GetNodeGene(node).m_type == NodeGeneType::Hidden)
+        {
+            if (genome.GetIncommingConnections(node).size() == 0 && genome.GetOutgoingConnections(node).size() == 0)
+            {
+                genome.m_nodeLinks.erase(node);
+            }
+        }
+    };
+
+    RemoveNode(inNode);
+    RemoveNode(outNode);
+
+    assert(CheckSanity(genome));
 }
 
 // Return false if adding a connection between srcNode to targetNode makes the network cyclic
@@ -725,15 +801,21 @@ void NEAT::Mutate()
 
         if (genome.m_protect)
         {
-            // Reset protect flag
-            genome.m_protect = false;
             continue;
         }
 
         // Add a new connection at random rate
         if (GetRandomProbability() < m_config.m_connectionAdditionRate)
         {
-            AddNewConnection(genome, m_config.m_allowCyclicNetwork);
+            AddNewConnection(genome);
+        }
+
+        if (m_config.m_removeConnectionsByMutation)
+        {
+            if (GetRandomProbability() < m_config.m_connectionRemovalRate)
+            {
+                RemoveConnection(genome);
+            }
         }
     }
 }
@@ -834,7 +916,10 @@ void NEAT::Speciation()
     {
         Genome& genome = AccessGenome(i);
 
-        // Reset species id first
+        // Reset protect flag
+        genome.m_protect = false;
+
+        // Reset species id
         genome.m_species = s_invalidSpeciesId;
 
         // Evaluate the genome and store its score
@@ -907,13 +992,6 @@ void NEAT::Speciation()
                     GetNumSpecies() > 2)
                 {
                     // Extinct this species
-
-                    // Clear all genomes in this species
-                    for (auto& s : species->m_scores)
-                    {
-                        m_scores[s.m_index].m_fitness = 0.f;
-                        m_scores[s.m_index].m_adjustedFitness = 0.f;
-                    }
                     species->m_bestScore.m_fitness = 0.f;
                     ++numSpeciesToDelete;
                     continue;
@@ -946,14 +1024,46 @@ void NEAT::Speciation()
         std::sort(species->m_scores.rbegin(), species->m_scores.rend());
     }
 
+    // Sort species in descending order
+    std::sort(m_generation.m_species.begin(), m_generation.m_species.end(), [](const Species* s1, const Species* s2)
+    {
+        return s2->m_bestScore < s1->m_bestScore;
+    });
+
     // If the entire population hasn't been progressing for a certain number of generations,
     // extinct all species except the top two
-    if (m_generation.m_prevBestFitness >= m_generation.m_species[0]->GetBestFitness())
+    if (m_config.m_extinctWholeGeneration &&
+        GetNumSpecies() > 2 &&
+        m_generation.m_prevBestFitness >= m_generation.m_species[0]->GetBestFitness())
     {
         ++m_generation.m_stagnantGenerationCount;
         if (m_generation.m_stagnantGenerationCount >= m_config.m_numGenerationsToExtinctMostSpecies)
         {
-            numSpeciesToDelete = GetNumSpecies() - 2;
+            // Find the number of species which have the best score and the second best score in the generation
+            int numSpKeep = 1;
+            {
+                float bestScore = m_generation.m_species[0]->GetBestFitness();
+                float secondScore = 0.f;
+                for (int i = 1; i < GetNumSpecies(); ++i)
+                {
+                    if (bestScore == m_generation.m_species[i]->GetBestFitness() ||
+                        secondScore == m_generation.m_species[i]->GetBestFitness())
+                    {
+                        ++numSpKeep;
+                    }
+                    else if (m_generation.m_species[i]->GetBestFitness() > secondScore)
+                    {
+                        secondScore = m_generation.m_species[i]->GetBestFitness();
+                        ++numSpKeep;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+
+            numSpeciesToDelete = GetNumSpecies() - numSpKeep;
             m_generation.m_stagnantGenerationCount = 0;
         }
     }
@@ -963,22 +1073,29 @@ void NEAT::Speciation()
         m_generation.m_stagnantGenerationCount = 0;
     }
 
-    // Sort species in descending order
-    std::sort(m_generation.m_species.begin(), m_generation.m_species.end(), [](const Species* s1, const Species* s2)
-    {
-        return s2->m_bestScore < s1->m_bestScore;
-    });
-
     // Delete species
-    // Because species are not sorted by best fitness, we just need to delete the last N elements in the array
-    for (int i = 0; i < numSpeciesToDelete; ++i)
+    // Because species are now sorted by best fitness, we just need to delete the last N elements in the array
+    if (GetNumSpecies() > numSpeciesToDelete)
     {
-        int index = GetNumSpecies() - 1 - i;
-        assert(m_generation.m_species[index]->GetBestFitness() == 0.f);
-        assert(m_generation.m_species[index]->m_adjustedTotalScore == 0.f);
-        delete m_generation.m_species[index];
+        for (int i = 0; i < numSpeciesToDelete; ++i)
+        {
+            const int index = GetNumSpecies() - 1 - i;
+            assert(index > 0);
+            Species* species = m_generation.m_species[index];
+
+            // Clear all genomes in this species
+            for (auto& s : species->m_scores)
+            {
+                m_scores[s.m_index].m_fitness = 0.f;
+                m_scores[s.m_index].m_adjustedFitness = 0.f;
+            }
+
+            delete species;
+        }
+        const int newSize = GetNumSpecies() - numSpeciesToDelete;
+        assert(newSize > 0);
+        m_generation.m_species.resize(newSize);
     }
-    m_generation.m_species.resize(GetNumSpecies() - numSpeciesToDelete);
 }
 
 // Calculate distance between two genomes based on their topologies and weights
@@ -986,6 +1103,12 @@ float NEAT::CalculateDistance(const Genome& genome1, const Genome& genome2) cons
 {
     const int numConsP1 = genome1.GetNumConnections();
     const int numConsP2 = genome2.GetNumConnections();
+
+    if (numConsP1 == 0 && numConsP2 == 0)
+    {
+        return 0;
+    }
+
     const int numConsLarge = numConsP1 > numConsP2 ? numConsP1 : numConsP2;
     const int numConsSmall = numConsP1 > numConsP2 ? numConsP2 : numConsP1;
     int numMismatches = 0;
@@ -1033,13 +1156,11 @@ float NEAT::CalculateDistance(const Genome& genome1, const Genome& genome2) cons
 
     if (numMatches == 0)
     {
-        return std::numeric_limits<float>::max();
+        numMatches = 1;
     }
-    else
-    {
-        return (float)numMismatches / (float)(numConsSmall >= 20 ? numConsLarge : 1) +
-            m_config.m_weightScaleForDistance * (weightDifference / (float)numMatches);
-    }
+
+    return (float)numMismatches / (float)(numConsSmall >= 20 ? numConsLarge : 1) +
+        m_config.m_weightScaleForDistance * (weightDifference / (float)numMatches);
 }
 
 // Select genomes to the next generation
@@ -1287,7 +1408,7 @@ auto NEAT::GetInheritanceFromSpecies(Species& sp, std::vector<Genome>& newGenome
 }
 
 // Perform cross over operation over two genomes and generate a new genome
-auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) const -> Genome
+auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome2, float fitness2) -> Genome
 {
     const Genome* parent1 = &genome1;
     const Genome* parent2 = &genome2;
@@ -1301,7 +1422,7 @@ auto NEAT::CrossOver(const Genome& genome1, float fitness1, const Genome& genome
     }
 
     // Create a new genome
-    Genome child;
+    Genome child = CreateDefaultInitialGenome(true);
 
     RandomIntDistribution<int> randomBinary(0, 1);
 
@@ -1618,7 +1739,7 @@ void NEAT::SetupInitialNodeGenes()
 }
 
 // Create default genome for the initial generation
-auto NEAT::CreateDefaultInitialGenome() -> Genome
+auto NEAT::CreateDefaultInitialGenome(bool noConnections) -> Genome
 {
     // Create two input nodes, one output node and two connections with random weight
     Genome genomeOut;
@@ -1630,8 +1751,11 @@ auto NEAT::CreateDefaultInitialGenome() -> Genome
     genomeOut.AddNode(input2);
     genomeOut.AddNode(output);
 
-    Connect(genomeOut, input1, output, GetRandomWeight());
-    Connect(genomeOut, input2, output, GetRandomWeight());
+    if (!noConnections)
+    {
+        Connect(genomeOut, input1, output, GetRandomWeight());
+        Connect(genomeOut, input2, output, GetRandomWeight());
+    }
 
     return genomeOut;
 }
@@ -1702,6 +1826,7 @@ bool NEAT::CheckSanity(const Genome& genome) const
     }
 
     // Check there is no dangling hidden nodes
+    if(!m_config.m_removeConnectionsByMutation)
     {
         for (auto elem : genome.m_nodeLinks)
         {
