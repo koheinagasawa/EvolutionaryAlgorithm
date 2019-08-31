@@ -231,7 +231,7 @@ void NEAT::SerializeGeneration(const char* fileName) const
                     printTabs(); json << "\"Nodes\" : [" << endl;
                     {
                         int i = 0;
-                        for (auto& elem : genome.m_nodeLinks)
+                        for (auto& elem : genome.m_nodes)
                         {
                             printTabs(); json << "{" << endl;
                             {
@@ -260,7 +260,7 @@ void NEAT::SerializeGeneration(const char* fileName) const
                             }
                             printTabs(); json << "}";
                             ++i;
-                            if (i != (int)genome.m_nodeLinks.size())
+                            if (i != (int)genome.m_nodes.size())
                             {
                                 json << "," << endl;
                             }
@@ -454,9 +454,7 @@ auto NEAT::Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float 
     return innovId;
 }
 
-// Add a new connection between random two nodes without allowing cyclic network
-// If allowCyclic is false, direction of the new connection is guaranteed to be one direction 
-// (distance from in node to an input node is smaller than the one of out node)
+// Add a new connection between random two nodes
 void NEAT::AddNewConnection(Genome& genome)
 {
     const size_t numNodes = genome.GetNumNodes();
@@ -464,7 +462,7 @@ void NEAT::AddNewConnection(Genome& genome)
     // Collect all node genes where we can add a new connection gene first
     std::vector<NodeGeneId> outNodeCandidates;
     {
-        for (const auto& elem : genome.m_nodeLinks)
+        for (const auto& elem : genome.m_nodes)
         {
             const NodeGeneId nodeId = elem.first;
             const NodeGene& node = GetNodeGene(nodeId);
@@ -517,12 +515,12 @@ void NEAT::AddNewConnection(Genome& genome)
             }
 
             // Find all nodes not connected to outNode
-            for (const auto& elem : genome.m_nodeLinks)
+            for (const auto& elem : genome.m_nodes)
             {
                 const NodeGeneId nodeId = elem.first;
                 const NodeGene& node = GetNodeGene(nodeId);
 
-                if (!m_config.m_allowCyclicNetwork && nodeId == outNodeId) continue;
+                if (!m_config.m_allowRecurrentNetwork && nodeId == outNodeId) continue;
 
                 // We can create a new connection leading from either input, bias and hidden nodes
                 if (node.m_type == NodeGeneType::Input ||
@@ -541,8 +539,8 @@ void NEAT::AddNewConnection(Genome& genome)
                     // Check if the node is already connected to the out node
                     if (alreadyConnectedNodes.find(nodeId) == alreadyConnectedNodes.end())
                     {
-                        // Check cyclic network
-                        if (m_config.m_allowCyclicNetwork || CanAddConnectionWithoutCyclic(genome, nodeId, outNodeId))
+                        // Check recurrent network
+                        if (m_config.m_allowRecurrentNetwork || CanAddConnectionWithoutRecurrent(genome, nodeId, outNodeId))
                         {
                             inNodeCandidates.push_back(nodeId);
                         }
@@ -608,7 +606,7 @@ void NEAT::RemoveConnection(Genome& genome, InnovationId innovId) const
 
     // Update node links
     {
-        Genome::Links& links = genome.m_nodeLinks[outNode];
+        Genome::Node& links = genome.m_nodes[outNode];
         std::vector<InnovationId>& incomings = links.m_incomings;
         for (auto itr = incomings.begin(); itr != incomings.end(); ++itr)
         {
@@ -621,7 +619,7 @@ void NEAT::RemoveConnection(Genome& genome, InnovationId innovId) const
         }
     }
     {
-        Genome::Links& links = genome.m_nodeLinks[inNode];
+        Genome::Node& links = genome.m_nodes[inNode];
         std::vector<InnovationId>& outgoings = links.m_outgoings;
         for (auto itr = outgoings.begin(); itr != outgoings.end(); ++itr)
         {
@@ -641,7 +639,7 @@ void NEAT::RemoveConnection(Genome& genome, InnovationId innovId) const
         {
             if (genome.GetIncommingConnections(node).size() == 0 && genome.GetOutgoingConnections(node).size() == 0)
             {
-                genome.m_nodeLinks.erase(node);
+                genome.m_nodes.erase(node);
             }
         }
     };
@@ -652,8 +650,8 @@ void NEAT::RemoveConnection(Genome& genome, InnovationId innovId) const
     assert(CheckSanity(genome));
 }
 
-// Return false if adding a connection between srcNode to targetNode makes the network cyclic
-bool NEAT::CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const
+// Return false if adding a connection between srcNode to targetNode makes the network recurrent
+bool NEAT::CanAddConnectionWithoutRecurrent(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const
 {
     if (srcNode == targetNode)
     {
@@ -686,7 +684,7 @@ bool NEAT::CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNod
             if (inNode == targetNode)
             {
                 // Reached to the target node
-                // The new connection will make the network cyclic
+                // The new connection will make the network recurrent
                 return false;
             }
 
@@ -844,15 +842,15 @@ void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes)
 
             // Update node links
             assert(!genome.HasNode(info.m_newNode));
-            genome.m_nodeLinks[info.m_newNode] = genome.m_nodeLinks[thisInfo.m_newNode];
-            genome.m_nodeLinks.erase(thisInfo.m_newNode);
-
+            Genome::Node& node = genome.m_nodes[info.m_newNode];
+            node = genome.m_nodes[thisInfo.m_newNode];
             assert(genome.GetIncommingConnections(info.m_newNode).size() == 1);
             assert(genome.GetOutgoingConnections(info.m_newNode).size() == 1);
-            genome.m_nodeLinks[info.m_newNode].m_incomings[0] = info.m_newConnection1;
-            genome.m_nodeLinks[info.m_newNode].m_outgoings[0] = info.m_newConnection2;
+            node.m_incomings[0] = info.m_newConnection1;
+            node.m_outgoings[0] = info.m_newConnection2;
+            genome.m_nodes.erase(thisInfo.m_newNode);
 
-            for (auto& innovId : genome.m_nodeLinks[outNode].m_incomings)
+            for (auto& innovId : genome.m_nodes[outNode].m_incomings)
             {
                 if (innovId == thisInfo.m_newConnection2)
                 {
@@ -860,7 +858,7 @@ void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes)
                     break;
                 }
             }
-            for (auto& innovId : genome.m_nodeLinks[inNode].m_outgoings)
+            for (auto& innovId : genome.m_nodes[inNode].m_outgoings)
             {
                 if (innovId == thisInfo.m_newConnection1)
                 {
@@ -871,15 +869,17 @@ void NEAT::EnsureUniqueGeneIndices(const NewlyAddedNodes& newNodes)
 
             // Update connections
             assert(!genome.HasConnection(info.m_newConnection1));
-            genome.m_connectionGenes[info.m_newConnection1] = genome.m_connectionGenes[thisInfo.m_newConnection1];
-            genome.m_connectionGenes[info.m_newConnection1].m_innovId = info.m_newConnection1;
-            genome.m_connectionGenes[info.m_newConnection1].m_outNode = info.m_newNode;
+            ConnectionGene& c1 = genome.m_connectionGenes[info.m_newConnection1];
+            c1 = genome.m_connectionGenes[thisInfo.m_newConnection1];
+            c1.m_innovId = info.m_newConnection1;
+            c1.m_outNode = info.m_newNode;
             genome.m_connectionGenes.erase(thisInfo.m_newConnection1);
 
             assert(!genome.HasConnection(info.m_newConnection2));
-            genome.m_connectionGenes[info.m_newConnection2] = genome.m_connectionGenes[thisInfo.m_newConnection2];
-            genome.m_connectionGenes[info.m_newConnection2].m_innovId = info.m_newConnection2;
-            genome.m_connectionGenes[info.m_newConnection2].m_inNode = info.m_newNode;
+            ConnectionGene& c2 = genome.m_connectionGenes[info.m_newConnection2];
+            c2 = genome.m_connectionGenes[thisInfo.m_newConnection2];
+            c2.m_innovId = info.m_newConnection2;
+            c2.m_inNode = info.m_newNode;
             genome.m_connectionGenes.erase(thisInfo.m_newConnection2);
 
             // Fix innovation history
@@ -1565,8 +1565,8 @@ void NEAT::TryAddConnection(const ConnectionGene& connection, const Genome* base
     if (!child.HasNode(inNode))  child.AddNode(inNode);
     if (!child.HasNode(outNode)) child.AddNode(outNode);
 
-    // Force to disable connection when it causes cyclic network
-    if (!m_config.m_allowCyclicNetwork && !CanAddConnectionWithoutCyclic(child, inNode, outNode))
+    // Force to disable connection when it causes recurrent network
+    if (!m_config.m_allowRecurrentNetwork && !CanAddConnectionWithoutRecurrent(child, inNode, outNode))
     {
         enable = false;
     }
@@ -1602,8 +1602,8 @@ void NEAT::TryAddIncompatibleRegion(const NodeGeneId incompatibleNode, const Gen
         // Disable gene at a certain probability when the parent's one is disabled
         bool enabled = c->m_enabled ? true : GetRandomProbability() >= m_config.m_geneDisablingRate;;
 
-        // Force to disable connection when it causes cyclic network
-        if (!m_config.m_allowCyclicNetwork && !CanAddConnectionWithoutCyclic(child, inNode, outNode))
+        // Force to disable connection when it causes recurrent network
+        if (!m_config.m_allowRecurrentNetwork && !CanAddConnectionWithoutRecurrent(child, inNode, outNode))
         {
             enabled = false;
         }
@@ -1646,35 +1646,65 @@ void NEAT::GetIncompatibleRegionRecursive(NodeGeneId current, const Genome* base
 }
 
 // Evaluate a genome and return its fitness
-float NEAT::Evaluate(const Genome& genom) const
+float NEAT::Evaluate(const Genome& genome) const
 {
     ++m_evaluationCount;
 
-    if (m_fitnessFunc)
-    {
-        return m_fitnessFunc(genom);
-    }
+    return EvaluateImpl(genome);
+}
 
-    return 0.0f;
+// This function should be called prior to every evaluation
+void NEAT::PrepareGenomeForEvaluation(const Genome& genome, std::unordered_map<NodeGeneId, float> initialValues) const
+{
+    // Reset nodes' value and state
+    for (const auto& elem : genome.m_nodes)
+    {
+        NodeGeneId nodeId = elem.first;
+        const Genome::Node& node = elem.second;
+        NodeGeneType type = m_generation.m_nodeGenes.at(nodeId).m_type;
+        if (type != NodeGeneType::Input && type != NodeGeneType::Bias)
+        {
+            node.m_state = NodeState::None;
+            node.m_value = 0.f;
+        }
+        else
+        {
+            node.m_state = NodeState::Evaluated;
+            if (initialValues.find(nodeId) != initialValues.end())
+            {
+                node.m_value = initialValues[nodeId];
+            }
+            else
+            {
+                node.m_value = 0.f;
+            }
+        }
+    }
 }
 
 // Evaluate value of a node
-float NEAT::EvaluateNode(const Genome& genome, NodeGeneId nodeId, std::unordered_map<NodeGeneId, float>& values) const
+float NEAT::EvaluateNode(const Genome& genome, NodeGeneId nodeId) const
 {
-    std::vector<NodeGeneId> evaluatingNodes;
-    EvaluateNodeRecursive(genome, nodeId, evaluatingNodes, values);
-    assert(values.find(nodeId) != values.end());
-    return values[nodeId];
+    EvaluateNodeRecursive(genome, nodeId);
+    const Genome::Node& node = genome.m_nodes.at(nodeId);
+    assert(node.m_state == NodeState::Evaluated);
+    return node.m_value;
 }
 
 // Evaluate value of nodes recursively
-void NEAT::EvaluateNodeRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const
+void NEAT::EvaluateNodeRecursive(const Genome& genome, NodeGeneId nodeId) const
 {
-    if (values.find(nodeId) != values.end())
+    assert(genome.HasNode(nodeId));
+
+    const Genome::Node& node = genome.m_nodes.at(nodeId);
+
+    if (node.m_state == NodeState::Evaluated)
     {
         // Already evaluated this node
         return;
     }
+
+    node.m_state = NodeState::Evaluating;
 
     float val = 0.f;
 
@@ -1689,45 +1719,26 @@ void NEAT::EvaluateNodeRecursive(const Genome& genome, NodeGeneId nodeId, std::v
 
         auto incomingNodeId = connectionGene->m_inNode;
 
-        if (values.find(incomingNodeId) == values.end())
+        const Genome::Node& incomingNode = genome.m_nodes.at(incomingNodeId);
+        if (incomingNode.m_state != NodeState::Evaluated)
         {
             // We've never evaluated this node yet. Evaluate it.
 
-            // Special treatment for cyclic network
-            if (m_config.m_allowCyclicNetwork)
-            {
-                // Check if we are already evaluating this node
-                // if so, skip calling recursive function to avoid infinite loop
-                bool alreadyEvaluating = false;
-                for (NodeGeneId id : evaluatingNodes)
-                {
-                    if (incomingNodeId == id)
-                    {
-                        alreadyEvaluating = true;
-                        break;
-                    }
-                }
-                if (alreadyEvaluating) continue;
-
-                evaluatingNodes.push_back(incomingNodeId);
-            }
+            // Check if we are already evaluating this node
+            // if so, skip calling recursive function to avoid infinite loop
+            if (incomingNode.m_state == NodeState::Evaluating) continue;
 
             // Evaluate the incoming node
-            EvaluateNodeRecursive(genome, incomingNodeId, evaluatingNodes, values);
-
-            // Remove the incoming node from evaluatingNode buffer
-            if (m_config.m_allowCyclicNetwork)
-            {
-                evaluatingNodes.resize(evaluatingNodes.size() - 1);
-            }
+            EvaluateNodeRecursive(genome, incomingNodeId);
         }
 
         // Calculate sum from all incoming connection
-        val += values[incomingNodeId] * connectionGene->m_weight;
+        val += incomingNode.m_value * connectionGene->m_weight;
     }
 
     // Apply activation function and store the result to the result map
-    values[nodeId] = m_activationFuncs[m_generation.m_nodeGenes[nodeId].m_activationFuncId](val);
+    node.m_value = m_activationFuncs[m_generation.m_nodeGenes[nodeId].m_activationFuncId](val);
+    node.m_state = NodeState::Evaluated;
 }
 
 // Set up node used for the initial network
@@ -1760,6 +1771,62 @@ auto NEAT::CreateDefaultInitialGenome(bool noConnections) -> Genome
     return genomeOut;
 }
 
+// Export genome as a neural network of smaller data representation which doesn't require information of the entire generation
+auto NEAT::ExportAsNeuralNetwork(const Genome* genome) -> NN
+{
+    NN nn;
+
+    // [TODO]: Do not copy unused activation functions
+    for (auto& activation : m_activationFuncs)
+    {
+        nn.AddActivationFunction(activation);
+    }
+
+    std::unordered_map<NodeGeneId, int> nodeMap;
+    std::unordered_map<InnovationId, int> connectionMap;
+
+    std::vector<NN::Node> nodes;
+    nodes.reserve(genome->GetNumNodes());
+
+    for (const auto& elem : genome->m_nodes)
+    {
+        const NodeGeneId nodeId = elem.first;
+        nodeMap[nodeId] = (int)nodes.size();
+        NN::Node nnn;
+        const NodeGene& node = GetNodeGene(nodeId);
+        nnn.m_activationFunc = node.m_activationFuncId;
+        nnn.m_type = node.m_type;
+        nodes.push_back(nnn);
+    }
+
+    std::vector<NN::Connection> connections;
+    connections.reserve(genome->GetNumConnections());
+
+    for (const auto& elem : genome->m_connectionGenes)
+    {
+        const InnovationId innovId = elem.first;
+        const ConnectionGene& con = elem.second;
+        connectionMap[innovId] = (int)connections.size();
+        NN::Connection nnc;
+        nnc.m_weight = con.m_weight;
+        nnc.m_inNode = nodeMap.at(con.m_inNode);
+        nnc.m_outNode = nodeMap.at(con.m_outNode);
+    }
+
+    int i = 0;
+    for (const auto& elem : genome->m_nodes)
+    {
+        const Genome::Node& node = elem.second;
+        nodes[i].m_incomingConnections.reserve(node.m_incomings.size());
+        for (const auto innovId : node.m_incomings)
+        {
+            nodes[i].m_incomingConnections.push_back(connectionMap[innovId]);
+        }
+    }
+
+    return nn;
+}
+
 bool NEAT::CheckSanity(const Genome& genome) const
 {
 #ifdef _DEBUG
@@ -1788,9 +1855,9 @@ bool NEAT::CheckSanity(const Genome& genome) const
 
     // Check consistency of node links
     {
-        for (auto elem : genome.m_nodeLinks)
+        for (auto elem : genome.m_nodes)
         {
-            const Genome::Links& links = elem.second;
+            const Genome::Node& links = elem.second;
             if (links.m_numEnabledIncomings > (int)links.m_incomings.size() ||
                 links.m_numEnabledOutgoings > (int)links.m_outgoings.size())
             {
@@ -1828,11 +1895,11 @@ bool NEAT::CheckSanity(const Genome& genome) const
     // Check there is no dangling hidden nodes
     if(!m_config.m_removeConnectionsByMutation)
     {
-        for (auto elem : genome.m_nodeLinks)
+        for (auto elem : genome.m_nodes)
         {
             if (m_generation.m_nodeGenes[elem.first].m_type == NodeGeneType::Hidden)
             {
-                const Genome::Links& links = elem.second;
+                const Genome::Node& links = elem.second;
                 // Hidden nodes must be connected to something in both directions
                 // [TODO]: Verify this condition is reasonable. It's not explicitly stated in the original paper.
                 if (links.m_incomings.size() == 0 || links.m_outgoings.size() == 0)
@@ -1843,12 +1910,12 @@ bool NEAT::CheckSanity(const Genome& genome) const
         }
     }
 
-    // Check if the network is not cyclic
-    if (!m_config.m_allowCyclicNetwork)
+    // Check if the network is not recurrent
+    if (!m_config.m_allowRecurrentNetwork)
     {
         for (const auto con : genome.m_connectionGenes)
         {
-            if (con.second.m_enabled && !CanAddConnectionWithoutCyclic(genome, con.second.m_inNode, con.second.m_outNode))
+            if (con.second.m_enabled && !CanAddConnectionWithoutRecurrent(genome, con.second.m_inNode, con.second.m_outNode))
             {
                 return false;
             }

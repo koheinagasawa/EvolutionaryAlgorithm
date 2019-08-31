@@ -21,39 +21,40 @@ public:
     {
         bool result = true;
         // Test 4 patterns of XOR
-        result &= EvalImpl(genome, false, false) <= 0.5f;
-        result &= EvalImpl(genome, false, true ) > 0.5f;
-        result &= EvalImpl(genome, true,  false) > 0.5f;
-        result &= EvalImpl(genome, true,  true ) <= 0.5f;
+        result &= EvaluateImpl(genome, false, false) <= 0.5f;
+        result &= EvaluateImpl(genome, false, true ) > 0.5f;
+        result &= EvaluateImpl(genome, true,  false) > 0.5f;
+        result &= EvaluateImpl(genome, true,  true ) <= 0.5f;
 
         return result;
     }
 
 protected:
 
-    float EvalImpl(const Genome& genome, bool input1, bool input2) const
+    float EvaluateImpl(const Genome& genome, bool input1, bool input2) const
     {
         // Initialize values
         std::unordered_map<NodeGeneId, float> values;
         values[m_biasNode] = 1.f;
         values[m_inputNode1] = input1 ? 1.f : 0.f;
         values[m_inputNode2] = input2 ? 1.f : 0.f;
+        PrepareGenomeForEvaluation(genome, values);
 
-        return EvaluateNode(genome, m_outputNode, values);
+        return EvaluateNode(genome, m_outputNode);
     }
 
     virtual
-    float Evaluate(const Genome& genome) const override
+    float EvaluateImpl(const Genome& genome) const override
     {
         ++m_evaluationCount;
 
         float score = 0.f;
 
         // Test 4 patterns of XOR
-        score += EvalImpl(genome, false, false);
-        score += 1.0f - EvalImpl(genome, false, true);
-        score += 1.0f - EvalImpl(genome, true, false);
-        score += EvalImpl(genome, true, true);
+        score += EvaluateImpl(genome, false, false);
+        score += 1.0f - EvaluateImpl(genome, false, true);
+        score += 1.0f - EvaluateImpl(genome, true, false);
+        score += EvaluateImpl(genome, true, true);
         score = 4.0f - score;
 
         return score * score;
@@ -112,14 +113,14 @@ int main()
     });
     config.m_diversityProtection = NEAT::DiversityProtectionMethod::Speciation;
     config.m_numGenomesInGeneration = 150;
-    config.m_allowCyclicNetwork = true;
+    config.m_allowRecurrentNetwork = false;
     config.m_enableSanityCheck = false;
 
     // Create NEAT
     XorNEAT neat;
 
     // Serialize option
-    bool serializeGenomes = true;
+    bool serializeGenomes = false;
     int serializationGenerationInterval = 10;
     auto serializeGeneration = [&neat](std::string baseOutputDir, int i)
     {

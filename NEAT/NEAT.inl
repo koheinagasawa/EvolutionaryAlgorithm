@@ -8,7 +8,7 @@
 
 inline bool NEAT::Genome::HasNode(NodeGeneId nodeId) const
 {
-    return m_nodeLinks.find(nodeId) != m_nodeLinks.end(); 
+    return m_nodes.find(nodeId) != m_nodes.end(); 
 }
 
 inline bool NEAT::Genome::HasConnection(InnovationId innovId) const
@@ -27,13 +27,13 @@ inline void NEAT::Genome::AddConnection(const ConnectionGene& c)
     assert(HasNode(outNode));
 
     m_connectionGenes.insert({ innovId, c });
-    m_nodeLinks[inNode].m_outgoings.push_back(innovId);
-    m_nodeLinks[outNode].m_incomings.push_back(innovId);
+    m_nodes[inNode].m_outgoings.push_back(innovId);
+    m_nodes[outNode].m_incomings.push_back(innovId);
 
     if (c.m_enabled)
     {
-        m_nodeLinks[inNode].m_numEnabledOutgoings++;
-        m_nodeLinks[outNode].m_numEnabledIncomings++;
+        m_nodes[inNode].m_numEnabledOutgoings++;
+        m_nodes[outNode].m_numEnabledIncomings++;
     }
 }
 
@@ -43,8 +43,8 @@ inline void NEAT::Genome::DisableConnection(InnovationId innovId)
     ConnectionGene& c = m_connectionGenes[innovId];
     if (c.m_enabled)
     {
-        m_nodeLinks[c.m_inNode].m_numEnabledOutgoings--;
-        m_nodeLinks[c.m_outNode].m_numEnabledIncomings--;
+        m_nodes[c.m_inNode].m_numEnabledOutgoings--;
+        m_nodes[c.m_outNode].m_numEnabledIncomings--;
     }
     c.m_enabled = false;
 }
@@ -52,7 +52,7 @@ inline void NEAT::Genome::DisableConnection(InnovationId innovId)
 inline void NEAT::Genome::AddNode(NodeGeneId nodeId)
 {
     assert(!HasNode(nodeId));
-    m_nodeLinks.insert({ nodeId, Links() });
+    m_nodes.insert({ nodeId, Node() });
 }
 
 inline int NEAT::Genome::GetNumConnections() const
@@ -72,19 +72,19 @@ inline int NEAT::Genome::GetNumEnabledConnections() const
 
 inline int NEAT::Genome::GetNumNodes() const
 {
-    return (int)m_nodeLinks.size();
+    return (int)m_nodes.size();
 }
 
 inline auto NEAT::Genome::GetIncommingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId> &
 {
     assert(HasNode(nodeId));
-    return m_nodeLinks.at(nodeId).m_incomings;
+    return m_nodes.at(nodeId).m_incomings;
 }
 
 inline auto NEAT::Genome::GetOutgoingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId> &
 {
     assert(HasNode(nodeId));
-    return m_nodeLinks.at(nodeId).m_outgoings;
+    return m_nodes.at(nodeId).m_outgoings;
 }
 
 //
@@ -179,8 +179,8 @@ inline auto NEAT::SelectRandomNodeGene(const std::vector<NodeGeneId>& genes) con
 
 inline auto NEAT::SelectRandomNodeGene(const Genome& genome) const -> NodeGeneId
 {
-    RandomIntDistribution<NodeGeneId> distribution(0, (int)genome.m_nodeLinks.size() - 1);
-    return std::next(std::begin(genome.m_nodeLinks), distribution(s_randomGenerator))->first;
+    RandomIntDistribution<NodeGeneId> distribution(0, (int)genome.m_nodes.size() - 1);
+    return std::next(std::begin(genome.m_nodes), distribution(s_randomGenerator))->first;
 }
 
 inline auto NEAT::SelectRandomConnectionGene(const std::vector<InnovationId>& genes) const -> InnovationId

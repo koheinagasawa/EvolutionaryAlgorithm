@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../NeuralNetwork/UnstructuredNeuralNetwork.h"
+
 #include <vector>
 #include <random>
 #include <functional>
@@ -7,18 +9,6 @@
 #include <map>
 #include <set>
 #include <memory>
-
-// Custom hasher for std::pair
-struct PairHash
-{
-    template <class T1, class T2>
-    auto operator () (const std::pair<T1, T2>& p) const -> std::size_t
-    {
-        auto h1 = std::hash<T1>{}(p.first);
-        auto h2 = std::hash<T2>{}(p.second);
-        return h1 ^ h2; // TODO: Too simple. This might not work very well as a hash.
-    }
-};
 
 // Base class for NEAT
 class NEAT
@@ -32,15 +22,15 @@ public:
     struct Species;
 
     // Type shortcuts
+    using NN = UnstructuredNeuralNetwork;
+    using NodeGeneType = NN::NodeType;
+    using NodeState = NN::NodeState;
     using GenerationId = uint32_t;
-    using NodeGeneId = uint32_t;
-    using InnovationId = uint32_t;
-    using ActivationFuncId = uint8_t;
     using SpeciesId = uint16_t;
-
-    using ActivationFunc = std::function<float(float)>;
-    using FitnessFunc = std::function<float(const Genome&)>;
-
+    using NodeGeneId = NN::NodeId;
+    using InnovationId = NN::ConnectionId;
+    using ActivationFuncId = NN::ActivationFuncId;
+    using ActivationFunc = NN::ActivationFunc;
     using ConnectionGeneList = std::map<InnovationId, ConnectionGene>;
     using GenomeList = std::shared_ptr<std::vector<Genome>>;
 
@@ -50,20 +40,21 @@ public:
     static const GenerationId s_invalidGenerationId = (GenerationId)-1;
     static const SpeciesId s_invalidSpeciesId = (SpeciesId)-1;
 
-    enum class NodeGeneType
-    {
-        Input,
-        Output,
-        Hidden,
-        Bias
-    };
+    // [TODO] The current way to store information for node and connection feels inconsistent
+    //        We should get rid of NodeGene and move info there to Genome::Node,
+    //        split information in ConnectionGene into two different struct based on whether its
+    //        globally common (m_innovId, m_inNode, m_outNode) or genome specific (m_weight, m_enabled).
+    //        Perhaps the former is more efficient in terms of runtime performance
+    //        with not too huge extra memory footprint (just 8 more bytes for all node genes in all genomes).
 
+    // Node information globally common for the entire generation
     struct NodeGene
     {
         NodeGeneType m_type;
         ActivationFuncId m_activationFuncId;
     };
 
+    // Connection information which contains specific information for each genome
     struct ConnectionGene
     {
         InnovationId m_innovId;
@@ -73,14 +64,19 @@ public:
         bool m_enabled;
     };
 
+    // The genome
     struct Genome
     {
-        struct Links
+        struct Node
         {
             int m_numEnabledIncomings = 0;
             int m_numEnabledOutgoings = 0;
             std::vector<InnovationId> m_incomings;
             std::vector<InnovationId> m_outgoings;
+
+            // Parameters used only during evaluation
+            mutable float m_value;
+            mutable NodeState m_state;
         };
 
         inline bool HasNode(NodeGeneId nodeId) const;
@@ -94,7 +90,8 @@ public:
         inline auto GetIncommingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId>&;
         inline auto GetOutgoingConnections(NodeGeneId nodeId) const -> const std::vector<InnovationId>&;
 
-        std::unordered_map<NodeGeneId, Links> m_nodeLinks;
+        // List of node genes
+        std::unordered_map<NodeGeneId, Node> m_nodes;
 
         // List of connection genes sorted by their innovation ids
         ConnectionGeneList m_connectionGenes;
@@ -149,12 +146,21 @@ public:
     // Settings of various parameters used in NEAT
     struct Configration
     {
-        FitnessFunc m_fitnessFunction;
+        // General parameters
+        int m_numGenomesInGeneration = 100;
+
+        // Indicates if NEAT allows to generate networks with recurrent connections
+        // If false, generated networks are guaranteed to be feed forward
+        bool m_allowRecurrentNetwork = true;
+
+
+        // Parameters for activation
+        bool m_useGlobalActivationFunc = true;
         ActivationFuncId m_defaultActivateFunctionId = 0;
         std::vector<ActivationFunc> m_activateFunctions;
 
-        int m_numGenomesInGeneration = 100;
 
+        // Parameters for weight mutation
         float m_maximumWeight = 10.0f;
         float m_minimumWeight = -10.0f;
         float m_weightMutationRate = .8f;
@@ -162,56 +168,41 @@ public:
         float m_weightNewValueRate = .1f;
         float m_weightPerturbation = 0.05f;
 
+
+        // Parameters for topological mutation
         float m_nodeAdditionRate = .03f;
         float m_connectionAdditionRate = .05f;
         bool m_removeConnectionsByMutation = false;
         float m_connectionRemovalRate = .005f;
 
+
+        // Parameters for cross over
         bool m_enableCrossOver = true;
         float m_crossOverRate = .75f;
         float m_geneDisablingRate = .75f;
         float m_interSpeciesMatingRate = .001f;
 
+
+        // Parameters for selection
         float m_lowerGenomeEliminationRate = 0.4f;
 
+
+        // Parameters for diversity protection
         DiversityProtectionMethod m_diversityProtection = DiversityProtectionMethod::Speciation;
 
+
+        // Parameters for speciation
         float m_speciationDistThreshold = 3.0f;
         float m_weightScaleForDistance = 0.4f;
-
         bool m_extinctStagnantSpecies = true;
         int m_numGenerationsToExtinctSpecies = 15;
         bool m_extinctWholeGeneration = true;
         int m_numGenerationsToExtinctMostSpecies = 20;
 
-        bool m_useGlobalActivationFunc = true;
 
-        // Indicates if NEAT allows to generate networks with cyclic connections
-        // If false, generated networks are guaranteed to be feed forward
-        bool m_allowCyclicNetwork = true;
-
+        // Parameters for debugging
         bool m_enableSanityCheck = true;
     };
-
-protected:
-
-    using NodePair = std::pair<NodeGeneId, NodeGeneId>;
-
-    struct NodeAddedInfo
-    {
-        Genome& m_genome;
-        NodeGeneId m_newNode;
-        InnovationId m_oldConnection;
-        InnovationId m_newConnection1;
-        InnovationId m_newConnection2;
-    };
-
-    using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NodeAddedInfo>>;
-
-    template <typename T>
-    using RandomIntDistribution = std::uniform_int_distribution<T>;
-    template <typename T>
-    using RandomRealDistribution = std::uniform_real_distribution<T>;
 
 public:
 
@@ -236,6 +227,9 @@ public:
     // Serialize generation as a json file
     void SerializeGeneration(const char* fileName) const;
 
+    // Export genome as a neural network of smaller data representation which doesn't require information of the entire generation
+    auto ExportAsNeuralNetwork(const Genome* genome) -> NN;
+
 protected:
 
     inline auto GetCurrentInnovationId() const -> InnovationId;
@@ -249,22 +243,23 @@ protected:
     // Connect the two nodes and assign the weight
     auto Connect(Genome& genome, NodeGeneId inNode, NodeGeneId outNode, float weight)->InnovationId;
 
+    // This function should be called prior to every evaluation
+    void PrepareGenomeForEvaluation(const Genome& genome, std::unordered_map<NodeGeneId, float> initialValues) const;
+
     // Evaluate a genome and return its fitness
-    virtual float Evaluate(const Genome& genom) const;
+    float Evaluate(const Genome& genom) const;
+
+    // Actual implementation of genome evaluation
+    virtual float EvaluateImpl(const Genome& genom) const = 0;
 
     // Evaluate value of a node
-    float EvaluateNode(const Genome& genome, NodeGeneId nodeId, std::unordered_map<NodeGeneId, float>& values) const;
-
-    // Evaluate value of each node recursively
-    void EvaluateNodeRecursive(const Genome& genome, NodeGeneId nodeId, std::vector<NodeGeneId>& evaluatingNodes, std::unordered_map<NodeGeneId, float>& values) const;
+    float EvaluateNode(const Genome& genome, NodeGeneId nodeId) const;
 
     // Set up node used for the initial network
     virtual void SetupInitialNodeGenes();
 
     // Create default genome for the initial generation
     virtual auto CreateDefaultInitialGenome(bool noConnections)->Genome;
-
-    //void RemoveStaleGenes();
 
     inline auto SelectRandomeGenome()->Genome &;
 
@@ -288,9 +283,22 @@ protected:
 
     static inline float GetRandomValue(float max);
 
+    // For debugging
     bool CheckSanity(const Genome& genome) const;
 
 private:
+
+    // Intermediate data for newly added node by mutation.
+    struct NodeAddedInfo
+    {
+        Genome& m_genome;
+        NodeGeneId m_newNode;
+        InnovationId m_oldConnection;
+        InnovationId m_newConnection1;
+        InnovationId m_newConnection2;
+    };
+
+    using NewlyAddedNodes = std::unordered_map<InnovationId, std::vector<NodeAddedInfo>>;
 
     inline auto AccessGenome(int index) -> Genome&;
     inline auto GetGenome(int index) const -> const Genome&;
@@ -300,8 +308,7 @@ private:
     // Add a new node at a random connection in the genome
     auto AddNewNode(Genome& genome)->NodeAddedInfo;
 
-    // Add a new connection between random two nodes in the genome allowing cyclic network
-    // If allowCyclic, direction of the new connection is guaranteed to be forward (distance from the input layer to in-node is smaller than the one for out-node)
+    // Add a new connection between random two nodes in the genome
     void AddNewConnection(Genome& genome);
 
     // Remove one connection from genome
@@ -309,8 +316,8 @@ private:
     void RemoveConnection(Genome& genome) const;
     void RemoveConnection(Genome& genome, InnovationId connection) const;
 
-    // Return false if adding a connection between srcNode to targetNode makes the network cyclic
-    bool CanAddConnectionWithoutCyclic(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
+    // Return false if adding a connection between srcNode to targetNode makes the network recurrent
+    bool CanAddConnectionWithoutRecurrent(const Genome& genome, NodeGeneId srcNode, NodeGeneId targetNode) const;
 
     // Implementation of generating a new generation
     void GenerateNewGeneration(bool printFitness);
@@ -347,6 +354,9 @@ private:
 
     inline auto SelectGenome(float value, const std::vector<Score>& scores) -> const Score&;
 
+    // Evaluate value of each node recursively
+    void EvaluateNodeRecursive(const Genome& genome, NodeGeneId nodeId) const;
+
 public:
 
     Configration m_config;
@@ -360,14 +370,31 @@ protected:
 
     std::vector<Score> m_scores;
 
-    FitnessFunc m_fitnessFunc;
-
     ActivationFuncId m_defaultActivationFuncId = 0;
     std::vector<ActivationFunc> m_activationFuncs;
+
+    // Custom hasher for std::pair
+    struct PairHash
+    {
+        template <class T1, class T2>
+        auto operator () (const std::pair<T1, T2>& p) const -> std::size_t
+        {
+            auto h1 = std::hash<T1>{}(p.first);
+            auto h2 = std::hash<T2>{}(p.second);
+            return h1 ^ h2; // TODO: Too simple. This might not work very well as a hash.
+        }
+    };
+
+    using NodePair = std::pair<NodeGeneId, NodeGeneId>;
 
     std::unordered_map<NodePair, InnovationId, PairHash> m_innovationHistory;
 
     bool m_isInitialized = false;
+
+    template <typename T>
+    using RandomIntDistribution = std::uniform_int_distribution<T>;
+    template <typename T>
+    using RandomRealDistribution = std::uniform_real_distribution<T>;
 
 private:
 
@@ -378,8 +405,6 @@ private:
     GenomeList m_nextGenGenomesBuffer = nullptr;
 
     static std::default_random_engine s_randomGenerator;
-
-    friend class NEAT_UnitTest;
 };
 
 #include "NEAT.inl"
